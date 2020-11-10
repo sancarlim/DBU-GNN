@@ -29,7 +29,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                                         force_reload=force_reload,
                                         verbose=verbose)
     '''
-    def __init__(self, data_path=None, train_val='train'):
+    def __init__(self, data_path=None, train_val):
         self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_train_data.pkl'
         self.train_val=train_val
         self.process()        
@@ -47,15 +47,15 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
         self.load_data()
         total_num = len(self.all_feature)
-        '''
-        last_vis_obj=[]   #contains number of visible objects in each sequence of the training, i.e. objects in frame 5
+        
+        self.last_vis_obj=[]   #contains number of visible objects in each sequence of the training, i.e. objects in frame 5
         #para hacer grafos de tamaño variable
-        for idx in range(len(adj)): 
-            for i in range(len(adj[idx])): 
-                if adj[idx][i,i] == 0:
-                    last_vis_obj.append(i)
+        for idx in range(len(self.all_adjacency)): 
+            for i in range(len(self.all_adjacency[idx])): 
+                if self.all_adjacency[idx][i,i] == 0:
+                    self.last_vis_obj.append(i)
                     break   
-        '''
+        
         feature_id = [3, 4, 9, 10]  #x,y,heading,[visible_mask]
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
@@ -81,26 +81,29 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
         total_valid_num = len(id_list)
         ind=np.random.permutation(id_list)
-        train_id_list, val_id_list = id_list[:round(total_valid_num*0.8)], id_list[round(total_valid_num*0.8):]
+        self.train_id_list, self.val_id_list = ind[:round(total_valid_num*0.8)], ind[round(total_valid_num*0.8):]
 
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
 
         if self.train_val.lower() == 'train':
-            self.node_features = self.node_features[train_id_list]
-            self.node_labels = self.node_labels[train_id_list]
-            self.all_adjacency = self.all_adjacency[train_id_list]
-            self.output_mask = self.output_mask[train_id_list]
-            self.all_mean_xy = self.all_mean_xy[train_id_list]
+            self.node_features = self.node_features[self.train_id_list]
+            self.node_labels = self.node_labels[self.train_id_list]
+            self.all_adjacency = self.all_adjacency[self.train_id_list]
+            self.output_mask = self.output_mask[self.train_id_list]
+            self.all_mean_xy = self.all_mean_xy[self.train_id_list]
         elif self.train_val.lower() == 'val':
-            self.node_features = self.node_features[val_id_list]
-            self.node_labels = self.node_labels[val_id_list]
-            self.all_adjacency = self.all_adjacency[val_id_list]
-            self.output_mask = self.output_mask[val_id_list]
-            self.all_mean_xy = self.all_mean_xy[val_id_list]
+            self.node_features = self.node_features[self.val_id_list]
+            self.node_labels = self.node_labels[self.val_id_list]
+            self.all_adjacency = self.all_adjacency[self.val_id_list]
+            self.output_mask = self.output_mask[self.val_id_list]
+            self.all_mean_xy = self.all_mean_xy[self.val_id_list]
 
     def __len__(self):
-        return len(self.node_features)
+        if self.train_val.lower() == 'train':
+            return len(self.train_id_list)
+        else:
+            return len(self.val_id_list)
 
     def __getitem__(self, idx):
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:70,:70])).int()
