@@ -111,15 +111,15 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             idx = self.train_id_list[idx]
         else:
             idx = self.val_id_list[idx]
-        graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:70,:70])).int()
+        graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
         graph = dgl.add_self_loop(graph)
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
         norm_distances = [1/(i) if i!=0 else 1 for i in distances]
         graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)
-        graph.ndata['x']=self.node_features[idx,:70]#self.last_vis_obj[idx]] #obj type, x, y
-        graph.ndata['gt']=self.node_labels[idx,:70]#self.last_vis_obj[idx]]
-        output_mask = self.output_mask[idx,:70]#self.last_vis_obj[idx]]
+        graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] #obj type, x, y
+        graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
+        output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]
         
         return graph, output_mask, self.last_vis_obj[idx]
