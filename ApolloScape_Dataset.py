@@ -56,7 +56,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 9, 10]  #x,y,heading,[visible_mask]
+        feature_id = [3, 4, 9]#, 10]  #x,y,heading,[visible_mask]
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
         mask_car=np.zeros((total_num,self.all_feature.shape[1],now_history_frame)) #NxVx6
