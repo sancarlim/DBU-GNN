@@ -81,7 +81,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
         total_valid_num = len(id_list)
         ind=np.random.permutation(id_list)
-        self.train_id_list, self.val_id_list = ind[:round(total_valid_num*0.8)], ind[round(total_valid_num*0.8):]
+        self.train_id_list, self.val_id_list, self.test_id_list = ind[:round(total_valid_num*0.75)], ind[round(total_valid_num*0.75):round(total_valid_num*0.95)],ind[round(total_valid_num*0.95):]
 
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
@@ -103,14 +103,18 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     def __len__(self):
         if self.train_val.lower() == 'train':
             return len(self.train_id_list)
-        else:
+        elif self.train_val.lower() == 'val':
             return len(self.val_id_list)
+        else:
+            return len(self.test_id_list)
 
     def __getitem__(self, idx):
         if self.train_val.lower() == 'train':
             idx = self.train_id_list[idx]
-        else:
+        elif self.train_val.lower() == 'val':
             idx = self.val_id_list[idx]
+        else:
+            idx = self.test_id_list[idx]
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
         graph = dgl.add_self_loop(graph)

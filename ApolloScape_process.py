@@ -4,7 +4,7 @@ import os
 from scipy import spatial 
 import pickle
 
-data_root = '../raw_data/ApolloScape'
+data_root = '/home/sandra/PROGRAMAS/raw_data/ApolloScape/'
 
 history_frames = 6 # 3 second * 2 frame/second
 future_frames = 6 # 3 second * 2 frame/second
@@ -61,7 +61,7 @@ def process_data(pra_now_dict, pra_start_ind, pra_end_ind, pra_observed_last):
     neighbor_matrix[:num_visible_object, :num_visible_object] = (dist_xy<neighbor_distance).astype(int)
 
     now_all_object_id = set([val for x in range(pra_start_ind, pra_end_ind) for val in pra_now_dict[x].keys()])  #todos los obj en los 6 frames
-    print(len(now_all_object_id))
+    #print(len(now_all_object_id))
     non_visible_object_id_list = list(now_all_object_id - set(visible_object_id_list))  #obj en alguno de los 6 frames pero no el ultimo
     num_non_visible_object = len(non_visible_object_id_list)
 
@@ -118,7 +118,7 @@ def generate_train_data(pra_file_path):
     all_feature_list = np.transpose(all_feature_list, (0, 3, 2, 1))
     all_adjacency_list = np.array(all_adjacency_list)
     all_mean_list = np.array(all_mean_list)
-    print(all_feature_list.shape, all_adjacency_list.shape)   #N= nº de secuencias (12 frames) en cada fichero - nºtotal=5010
+    #print(all_feature_list.shape, all_adjacency_list.shape)   #N= nº de secuencias (12 frames) en cada fichero - nºtotal=5010
     #Es decir, 1ª secuencia (6s): frame 0 + 12,  así hasta el frame(end-12)+12
     return all_feature_list, all_adjacency_list, all_mean_list
 
@@ -131,6 +131,7 @@ def generate_test_data(pra_file_path):
     all_adjacency_list = []
     all_mean_list = []
     # get all start frame id
+    print(frame_id_set[::history_frames])
     start_frame_id_list = frame_id_set[::history_frames]
     for start_ind in start_frame_id_list:
         start_ind = int(start_ind)
@@ -159,7 +160,7 @@ def generate_data(pra_file_path_list, pra_is_train=True):
         if pra_is_train:     #53 iters (files)
             now_data, now_adjacency, now_mean_xy = generate_train_data(file_path)
         else:
-            now_data, now_adjacency, now_mean_xy = generate_test_data(file_path)
+            now_data, now_adjacency, now_mean_xy = generate_test_data(file_path)   #generate_test_data!!!
         all_data.extend(now_data)
         all_adjacency.extend(now_adjacency)
         all_mean_xy.extend(now_mean_xy)
@@ -184,7 +185,7 @@ def generate_data(pra_file_path_list, pra_is_train=True):
 if __name__ == '__main__':
     train_file_path_list = sorted(glob.glob(os.path.join(data_root, 'prediction_train/*.txt')))
     test_file_path_list = sorted(glob.glob(os.path.join(data_root, 'prediction_test/*.txt')))
-
+    
     print('Generating Training Data.')
     generate_data(train_file_path_list, pra_is_train=True)
 
