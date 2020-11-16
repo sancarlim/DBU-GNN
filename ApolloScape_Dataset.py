@@ -117,7 +117,12 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             idx = self.test_id_list[idx]
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
-        graph = dgl.add_self_loop(graph)
+        
+        for n in graph.nodes():
+            if graph.in_degrees(n) == 0:
+                graph.add_edges(n,n)
+        
+        #graph = dgl.add_self_loop(graph)
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
         norm_distances = [1/(i) if i!=0 else 1 for i in distances]

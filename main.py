@@ -36,10 +36,10 @@ history_frames = 6 # 3 second * 2 frame/second
 future_frames = 6 # 3 second * 2 frame/second
 total_epoch = 40
 base_lr = 0.001
-hidden_dims = 128
+hidden_dims = 256
 model_type = 'gat' #gcn
 batch_train=64
-batch_val=64
+batch_val=32
 lr_decay_epoch = 5
 dev = 'cuda' 
 work_dir = './models_checkpoints'
@@ -80,9 +80,11 @@ def display_result(results, pra_pref='Train_epoch'):
 	
 
 def my_save_model(model):
-	path = '{}/{}_b{}_hid{}_ep{:04}.pt'.format(work_dir, model_type, batch_train,hidden_dims, total_epoch)
-	torch.save(model.state_dict(), path)
-	print('Successfull saved to {}'.format(path))
+    path = '{}/{}_bt{}bv{}_hid{}_lr{}_ep{:03}.pt'.format(work_dir, model_type, batch_train,batch_val, hidden_dims, base_lr, total_epoch)
+    if os.path.exists(path):
+        path= path + '_' + str(datetime.now().minute)
+    torch.save(model.state_dict(), path)
+    print('Successfully saved to {}'.format(path))
 
 def my_load_model(pra_model, pra_path):
 	checkpoint = torch.load(pra_path)
@@ -116,6 +118,7 @@ def compute_RMSE_batch(pred, gt, mask):
 def train(model, train_dataloader, val_dataloader, opt):
     train_loss_sum=[]
     val_loss_sum=[]
+    val_loss_prev=0
     for epoch in range(total_epoch):
         print('Epoch: ',epoch)
         overall_loss_train=[]
@@ -143,6 +146,30 @@ def train(model, train_dataloader, val_dataloader, opt):
         train_loss_sum.append(np.sum(overall_loss_train)/len(overall_loss_train))
 
         val(model, val_dataloader, val_loss_sum)
+
+        if val_loss_prev < val_loss_sum[-1] and epoch !=0:
+            patience+=1
+            val_loss_prev = val_loss_sum[-1]
+        else:
+            patience = 0
+            val_loss_prev = val_loss_sum[-1]
+        if patience > 2:
+            print("Early stopping: ")
+            print("Difference: {}".format(val_loss_prev-val_loss_sum[-1]))
+            break
+
+    print('Val loss sum: {}'.format(val_loss_sum))
+    epochs = list(range(total_epoch))
+    plt.subplot(1,2,1)
+    plt.plot(epochs,train_loss_sum)
+    plt.xlabel('Epochs')
+    plt.ylabel('Train Loss')
+    plt.subplot(1,2,2)
+    plt.plot(epochs,val_loss_sum)
+    plt.xlabel('Epochs')
+    plt.ylabel('Val Loss')
+    plt.show()
+
     my_save_model(model)
 
 def val(model, val_dataloader,val_loss_sum):
@@ -175,6 +202,7 @@ def val(model, val_dataloader,val_loss_sum):
     print('|{}| Val_loss: {}'.format(datetime.now(), ' '.join(['{:.3f}'.format(x) for x in list(overall_loss_time) + [np.sum(overall_loss_time)]])))
     val_loss_sum.append(np.sum(overall_loss_time))
 
+
 	
 def test(model, test_dataloader):
     model.eval()
@@ -192,7 +220,7 @@ def test(model, test_dataloader):
 
             labels= batched_graph.ndata['gt'][:,:,:].float().to(dev)
             #labels = labels.view(labels.shape[0], -1)
-            pred = gat_model(batched_graph, feats,e_w,snorm_n,snorm_e)
+            pred = model(batched_graph, feats,e_w,snorm_n,snorm_e)
             _, overall_num, x2y2_error = compute_RMSE_batch(pred, labels, output_masks[:,:,:])
             #print(x2y2_error.shape)  #BV,T
             overall_num_list.extend(overall_num.detach().cpu().numpy())

@@ -2,6 +2,7 @@ import dgl
 import torch
 import torch.nn as nn
 import os
+import torch.nn.functional as F
 os.environ['DGLBACKEND'] = 'pytorch'
 from dgl import DGLGraph
 import numpy as np
@@ -60,14 +61,16 @@ class GCNLayer(nn.Module):
 class GCN(nn.Module):
     def __init__(self, in_feats, hid_feats, out_feats):
         super().__init__()
-        self.conv1 = GCNLayer(in_feats=in_feats, out_feats=hid_feats)
-        self.conv2 = GCNLayer(in_feats=hid_feats, out_feats=out_feats)
-        self.fc= nn.Linear(out_feats,out_feats)
+        self.embedding_h = nn.Linear(in_feats, hid_feats)
+        self.conv1 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
+        self.conv2 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
+        self.fc= nn.Linear(hid_feats,out_feats)
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
-        #inputs are features of nodes
-        h,e_w = self.conv1(graph, inputs,e_w,snorm_n, snorm_e) #Vx6x4 -> Vx6x32  
+        # input embedding
+        h = self.embedding_h(inputs)
+        h,e_w = self.conv1(graph, h,e_w,snorm_n, snorm_e) #Vx6x4 -> Vx6x32  
         h = F.relu(h)
         h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e)  #Vx6x2  
+        h = F.relu(h)
         y = self.fc(h)
         return y
-        

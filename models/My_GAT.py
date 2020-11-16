@@ -27,10 +27,10 @@ class My_GATLayer(nn.Module):
     def reduce_func(self, nodes):
         h_s = nodes.data['h_s']
         a = F.softmax(nodes.mailbox['e'], dim=1)   #attention score between nodes i and j
-        h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1)
+        h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1)  
         return {'h': h}
                                
-    def forward(self, g, h):
+    def forward(self, g, h, snorm_n):
         with g.local_scope():
             h_in = h
             g.ndata['h']  = h 
@@ -92,19 +92,18 @@ class My_GAT(nn.Module):
         #self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, heads)
         #self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim, 1)
         
-        self.linear1 = nn.Linear(hidden_dim, int(hidden_dim/2))
-        self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
+        self.linear1 = nn.Linear(hidden_dim, output_dim)
+        #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
         
     def forward(self, g, h,e_w,snorm_n,snorm_e):
         
         # input embedding
         h = self.embedding_h(h)  #input (70, 6,4) - (70, 6,32) checked
         # gat layers
-        h = self.gat_1(g, h)
-        h = self.gat_2(g, h)
+        h = self.gat_1(g, h,snorm_n)
+        h = self.gat_2(g, h,snorm_n)  #RELU DENTRO DE LA GAT_LAYER
         
         y = self.linear1(h)  # (6,32) -> (6,2)
-        y = self.linear2(torch.relu(y))
+        #y = self.linear2(torch.relu(y))
         return y
     
-print( My_GAT(input_dim=18, hidden_dim=128, output_dim=12))
