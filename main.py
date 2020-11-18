@@ -17,8 +17,11 @@ from datetime import datetime
 from ApolloScape_Dataset import ApolloScape_DGLDataset
 from models.GCN import GCN 
 from models.My_GAT import My_GAT
+from models.Gated_GCN import GatedGCN
 from tqdm import tqdm
 import random
+import wandb
+
 
 def seed_torch(seed=0):
 	random.seed(seed)
@@ -34,23 +37,25 @@ seed_torch()
 
 history_frames = 6 # 3 second * 2 frame/second
 future_frames = 6 # 3 second * 2 frame/second
-total_epoch = 40
-base_lr = 0.001
-hidden_dims = 256
-model_type = 'gat' #gcn
+total_epoch = 50
+base_lr = 1e-3
+hidden_dims = 128
+model_type = 'gated' #gcn
 batch_train=64
-batch_val=32
-lr_decay_epoch = 5
+batch_val=64
 dev = 'cuda' 
 work_dir = './models_checkpoints'
 log_file = os.path.join(work_dir,'log_test.txt')
 test_result_file = 'prediction_result.txt'
+wandb.init(project="dbu_graph", config={"epochs": total_epoch, "batch_size": batch_train, "learning_rate": base_lr, 
+"model_architecture": model_type, "hidden_dims": hidden_dims})
+
 
 if not os.path.exists(work_dir):
 	os.makedirs(work_dir)
 
 def collate_batch(samples):
-    graphs, masks, last_vis_obj = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    graphs, masks = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
     masks = np.vstack(masks)
     masks = torch.tensor(masks)#+torch.zeros(2)
     #masks = masks.view(masks.shape[0],-1)
@@ -62,7 +67,7 @@ def collate_batch(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph.to(dev), masks.to(dev), snorm_n.to(dev), snorm_e.to(dev), last_vis_obj
+    return batched_graph.to(dev), masks.to(dev), snorm_n.to(dev), snorm_e.to(dev)
 
 def my_print(content):
 	with open(log_file, 'a') as writer:
@@ -82,15 +87,15 @@ def display_result(results, pra_pref='Train_epoch'):
 def my_save_model(model):
     path = '{}/{}_bt{}bv{}_hid{}_lr{}_ep{:03}.pt'.format(work_dir, model_type, batch_train,batch_val, hidden_dims, base_lr, total_epoch)
     if os.path.exists(path):
-        path= path + '_' + str(datetime.now().minute)
+        path= '.' + path.split('.')[1] + '_' + str(datetime.now().minute)+ '.pt'
     torch.save(model.state_dict(), path)
     print('Successfully saved to {}'.format(path))
 
-def my_load_model(pra_model, pra_path):
-	checkpoint = torch.load(pra_path)
-	pra_model.load_state_dict(checkpoint['xin_graph_seq2seq_model'])
-	print('Successfull loaded from {}'.format(pra_path))
-	return pra_model
+def my_load_model(model, path):
+	checkpoint = torch.load(path)
+	model.load_state_dict(checkpoint['graph_model'])
+	print('Successfull loaded from {}'.format(path))
+	return model
 
 
 def compute_RMSE(pred, gt, mask): 
@@ -116,21 +121,24 @@ def compute_RMSE_batch(pred, gt, mask):
     return overall_sum_time, overall_num, x2y2_error
 
 def train(model, train_dataloader, val_dataloader, opt):
+    wandb.watch(model, log="all")
     train_loss_sum=[]
     val_loss_sum=[]
     val_loss_prev=0
-    for epoch in range(total_epoch):
+    n_epochs=0
+    for epoch in tqdm(range(total_epoch)):
         print('Epoch: ',epoch)
+        n_epochs=epoch+1
         overall_loss_train=[]
         model.train()
-        for batched_graph, output_masks,snorm_n, snorm_e,last_vis_obj in tqdm(train_dataloader):
+        for _,(batched_graph, output_masks,snorm_n, snorm_e) in enumerate(train_dataloader):
             feats = batched_graph.ndata['x'].float().to(dev)
-            #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
+            #reshape to have (B*V,T*C) [c1,c2,...,c6]
             feats = feats.view(feats.shape[0],-1)
             e_w = batched_graph.edata['w'].float().to(dev)
             
             #for GatedGCN
-            #e_w= e_w.view(e_w.shape[0],1)
+            e_w= e_w.view(e_w.shape[0],1)
             
             labels= batched_graph.ndata['gt'].float().to(dev)
             pred = model(batched_graph, feats,e_w,snorm_n,snorm_e)   #70,6,2
@@ -144,8 +152,9 @@ def train(model, train_dataloader, val_dataloader, opt):
         #print('|{}| Train_loss: {}'.format(datetime.now(), ' '.join(['{:.3f}'.format(x) for x in list(overall_loss_train) + [np.sum(overall_loss_train)]])))
         print('|{}| Train_loss: {}'.format(datetime.now(), np.sum(overall_loss_train)/len(overall_loss_train)))
         train_loss_sum.append(np.sum(overall_loss_train)/len(overall_loss_train))
+        wandb.log({"Train/loss": train_loss_sum[-1]}, step=epoch)
 
-        val(model, val_dataloader, val_loss_sum)
+        val(model, val_dataloader, val_loss_sum, epoch)
 
         if val_loss_prev < val_loss_sum[-1] and epoch !=0:
             patience+=1
@@ -154,12 +163,12 @@ def train(model, train_dataloader, val_dataloader, opt):
             patience = 0
             val_loss_prev = val_loss_sum[-1]
         if patience > 2:
-            print("Early stopping: ")
-            print("Difference: {}".format(val_loss_prev-val_loss_sum[-1]))
+            print("Early stopping")
             break
 
-    print('Val loss sum: {}'.format(val_loss_sum))
-    epochs = list(range(total_epoch))
+    torch.save(model.state_dict(), os.path.join(wandb.run.dir, 'model.pt'))
+        
+    epochs = list(range(n_epochs))
     plt.subplot(1,2,1)
     plt.plot(epochs,train_loss_sum)
     plt.xlabel('Epochs')
@@ -172,19 +181,27 @@ def train(model, train_dataloader, val_dataloader, opt):
 
     my_save_model(model)
 
-def val(model, val_dataloader,val_loss_sum):
+'''
+def train_log(loss, example_ct, epoch):
+    loss = float(loss)
+    wandb.log({"epoch": epoch, "loss": loss}, step=example_ct)
+    print(f"Loss after " + str(example_ct).zfill(5) + f" examples: {loss:.3f}")
+'''
+
+
+def val(model, val_dataloader,val_loss_sum, epoch):
     model.eval()
     with torch.no_grad():
         overall_num_list=[] 
         overall_x2y2_list=[]
-        for batched_graph, output_masks,snorm_n, snorm_e,last_vis_obj in tqdm(val_dataloader):
+        for batched_graph, output_masks,snorm_n, snorm_e in tqdm(val_dataloader):
             feats = batched_graph.ndata['x'].float().to(dev)
-            #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
+            #reshape to have (B*V,T*C) [c1,c2,...,c6]
             feats = feats.view(feats.shape[0],-1)
             e_w = batched_graph.edata['w'].float().to(dev)
             
             #for GatedGCN
-            #e_w= e_w.view(e_w.shape[0],1)
+            e_w= e_w.view(e_w.shape[0],1)
             
             labels= batched_graph.ndata['gt'][:,:,:].float().to(dev)
             #labels = labels.view(labels.shape[0], -1)
@@ -201,6 +218,7 @@ def val(model, val_dataloader,val_loss_sum):
 
     print('|{}| Val_loss: {}'.format(datetime.now(), ' '.join(['{:.3f}'.format(x) for x in list(overall_loss_time) + [np.sum(overall_loss_time)]])))
     val_loss_sum.append(np.sum(overall_loss_time))
+    wandb.log({'Val/Loss': val_loss_sum[-1] }, step=epoch)
 
 
 	
@@ -209,24 +227,24 @@ def test(model, test_dataloader):
     with torch.no_grad():
         overall_num_list=[] 
         overall_x2y2_list=[]
-        for batched_graph, output_masks,snorm_n, snorm_e,last_vis_obj in tqdm(test_dataloader):
+        for batched_graph, output_masks,snorm_n, snorm_e in tqdm(test_dataloader):
             feats = batched_graph.ndata['x'].float().to(dev)
             #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
             feats = feats.view(feats.shape[0],-1)
             e_w = batched_graph.edata['w'].float().to(dev)
 
             #for GatedGCN
-            #e_w= e_w.view(e_w.shape[0],1)
+            e_w= e_w.view(e_w.shape[0],1)
 
-            labels= batched_graph.ndata['gt'][:,:,:].float().to(dev)
+            labels= batched_graph.ndata['gt'].float().to(dev)
             #labels = labels.view(labels.shape[0], -1)
             pred = model(batched_graph, feats,e_w,snorm_n,snorm_e)
-            _, overall_num, x2y2_error = compute_RMSE_batch(pred, labels, output_masks[:,:,:])
+            _, overall_num, x2y2_error = compute_RMSE_batch(pred, labels, output_masks)
             #print(x2y2_error.shape)  #BV,T
             overall_num_list.extend(overall_num.detach().cpu().numpy())
             #print(overall_num.shape)  #BV,T
             overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  #RMSE para cada nodo en cada T
-
+        
     overall_sum_time=np.sum(overall_x2y2_list,axis=0)  #BV,T->T RMSE medio en cada T
     overall_num_time =np.sum(overall_num_list, axis=0)
     overall_loss_time=(overall_sum_time / overall_num_time) #media del error de cada agente en cada frame
@@ -240,15 +258,18 @@ if __name__ == '__main__':
     val_dataset = ApolloScape_DGLDataset(train_val='val')  #919
     test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
 
-    train_dataloader=DataLoader(train_dataset, batch_size=batch_train, shuffle=False, collate_fn=collate_batch)
-    val_dataloader=DataLoader(val_dataset, batch_size=batch_val, shuffle=False, collate_fn=collate_batch)
+    train_dataloader=DataLoader(train_dataset, batch_size=batch_train, shuffle=True, collate_fn=collate_batch)
+    val_dataloader=DataLoader(val_dataset, batch_size=batch_val, shuffle=True, collate_fn=collate_batch)
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch)
 
     if model_type == 'gat':
         model = My_GAT(input_dim=18, hidden_dim=hidden_dims, output_dim=12).to(dev)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=18, hid_feats=hidden_dims, out_feats=12).to(dev)
+    else:
+        model = GatedGCN(input_dim=18, hidden_dim=hidden_dims, output_dim=12).to(dev)
 
+    
     opt = torch.optim.Adam(model.parameters(), lr=base_lr)
 
     print("############### TRAIN ####################")

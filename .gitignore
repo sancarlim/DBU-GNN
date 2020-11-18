@@ -133,3 +133,6 @@ dmypy.json
 *.pkl
 apollo_train_data.pkl
 apollo_test_data.pkl
+
+#wandb
+wandb

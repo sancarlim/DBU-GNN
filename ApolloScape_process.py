@@ -44,7 +44,7 @@ def get_frame_instance_dict(pra_file_path):
 
 def process_data(pra_now_dict, pra_start_ind, pra_end_ind, pra_observed_last):
     visible_object_id_list = list(pra_now_dict[pra_observed_last].keys()) # object_id appears at the last observed frame
-    #para ver los obj visibles en esa secuencia miramos el final de la sec¿? 
+    #para ver los obj visibles en esa secuencia miramos el final de la sec
     num_visible_object = len(visible_object_id_list) # number of current observed objects
 
     # compute the mean values of x and y (of all obj detected) for zero-centralization. 
@@ -119,7 +119,6 @@ def generate_train_data(pra_file_path):
     all_adjacency_list = np.array(all_adjacency_list)
     all_mean_list = np.array(all_mean_list)
     #print(all_feature_list.shape, all_adjacency_list.shape)   #N= nº de secuencias (12 frames) en cada fichero - nºtotal=5010
-    #Es decir, 1ª secuencia (6s): frame 0 + 12,  así hasta el frame(end-12)+12
     return all_feature_list, all_adjacency_list, all_mean_list
 
 
