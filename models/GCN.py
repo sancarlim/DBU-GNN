@@ -8,14 +8,17 @@ from dgl import DGLGraph
 import numpy as np
 import dgl.function as fn
 
-
 gcn_msg=fn.u_mul_e('h', 'w', 'm') #elemnt-wise (broadcast)
 gcn_reduce = fn.sum(msg='m', out='h')
 class GCNLayer(nn.Module):
-    def __init__(self, in_feats, out_feats):
+    def __init__(self, in_feats, out_feats, dropout):
         super(GCNLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear = nn.Linear(in_feats, out_feats)
+        if dropout:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = 0.
         
     def reduce_func(self, nodes):
         h = torch.sum(nodes.mailbox['m'], dim=1)
@@ -26,6 +29,9 @@ class GCNLayer(nn.Module):
         # (such as the `'h'` ndata below) are automatically popped out
         # when the scope exits.
         with g.local_scope():
+            
+            if self.dropout:
+                feature = self.dropout(feature)
             
             g.ndata['h_s']=self.linear_self(feature)
             
@@ -57,20 +63,25 @@ class GCNLayer(nn.Module):
             
             return h, e_w
 
-
 class GCN(nn.Module):
-    def __init__(self, in_feats, hid_feats, out_feats):
+    def __init__(self, in_feats, hid_feats, out_feats, dropout):
         super().__init__()
         self.embedding_h = nn.Linear(in_feats, hid_feats)
         self.conv1 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
         self.conv2 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
         self.fc= nn.Linear(hid_feats,out_feats)
+        self.dropout = dropout
+        if dropout:
+            self.linear_dropout = nn.Dropout(dropout)
+        else:
+            self.linear_dropout = 0.
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
         # input embedding
         h = self.embedding_h(inputs)
-        h,e_w = self.conv1(graph, h,e_w,snorm_n, snorm_e) #Vx6x4 -> Vx6x32  
+        h,_ = self.conv1(graph, h,e_w,snorm_n, snorm_e,self.dropout) #Vx6x4 -> Vx6x32  
         h = F.relu(h)
-        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e)  #Vx6x2  
+        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e,self.dropout)  #Vx6x2 
         h = F.relu(h)
+        h = self.linear_dropout(h)
         y = self.fc(h)
         return y
