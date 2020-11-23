@@ -44,7 +44,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 9]#, 10]  #x,y,heading,[visible_mask]
+        feature_id = [3, 4, 9, 10]  #x,y,heading,[visible_mask]
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
         mask_car=np.zeros((total_num,self.all_feature.shape[1],now_history_frame)) #NxVx6
@@ -62,13 +62,14 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         self.node_features[:,:,:,-1] *= mask_car   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
         self.node_labels[:,:,:,-1] *= mask_car
 
+        '''
         scaler=StandardScaler()
         
         scale_xy=self.node_features[:,:,:,:2].reshape(self.node_features[:,:,:,:2].shape[0]*self.node_features[:,:,:,:2].shape[1],-1)  #NxV,T*C(x,y)
         scaler.fit(scale_xy)
         scaler.transform(scale_xy)
         self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
-        
+        '''
 
         self.output_mask= self.all_feature[:,:,6:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
         self.output_mask = np.array(self.output_mask.unsqueeze_(-1) )

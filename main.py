@@ -238,8 +238,8 @@ def test(model, model_type, test_dataloader):
     overall_loss_time=(overall_sum_time / overall_num_time) #media del error de cada agente en cada frame
 
     print('|{}| Test_RMSE: {}'.format(datetime.now(), ' '.join(['{:.3f}'.format(x) for x in list(overall_loss_time) + [np.sum(overall_loss_time)]])))
-    wandb.log('test/loss_per_sec', overall_loss_time)
-    wandb.log('test/log', np.sum(overall_loss_time))
+    wandb.log({'test/loss_per_sec': overall_loss_time }) 
+    wandb.log({'test/log': np.sum(overall_loss_time) }) 
     
 
 
@@ -252,7 +252,7 @@ def sweep_train():
     val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size,  shuffle=False,num_workers=12, collate_fn=collate_batch)
 
     if config.model_type == 'gat':
-        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop).to(dev)
+        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop).to(dev)
     elif config.model_type == 'gcn':
         model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout).to(dev)
     elif config.model_type == 'gated':
@@ -274,7 +274,7 @@ if __name__ == '__main__':
     test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
 
     
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=8, collate_fn=collate_batch)
+    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch)
 
     sweep_config = {
     "name": "Sweep gat dropout",
@@ -288,19 +288,19 @@ if __name__ == '__main__':
                 "values": [64]
             },
             "hidden_dims": {
-                "values": [128,256]
+                "values": [256]
             },
             "model_type": {
                 "values": ['gat']
             },
             "dropout": {
-                "values": [0., 0.25]
+                "values": [0.25]
             },
             "feat_drop": {
-                "values": [0., 0.1]
+                "values": [0.25, 0.1]
             },
             "attn_drop": {
-                "values": [0., 0.1]
+                "values": [0.25, 0.1]
             }
         }
     }

@@ -18,7 +18,7 @@ class GCNLayer(nn.Module):
         if dropout:
             self.dropout = nn.Dropout(dropout)
         else:
-            self.dropout = 0.
+            self.dropout = nn.Dropout(0.)
         
     def reduce_func(self, nodes):
         h = torch.sum(nodes.mailbox['m'], dim=1)
@@ -74,7 +74,7 @@ class GCN(nn.Module):
         if dropout:
             self.linear_dropout = nn.Dropout(dropout)
         else:
-            self.linear_dropout = 0.
+            self.linear_dropout =  nn.Dropout(0.)
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
         # input embedding
         h = self.embedding_h(inputs)

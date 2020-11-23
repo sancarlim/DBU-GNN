@@ -134,5 +134,10 @@ dmypy.json
 apollo_train_data.pkl
 apollo_test_data.pkl
 
+
+#lightning
+/lightning_logs
+/logs
+
 #wandb
 wandb

@@ -34,13 +34,6 @@ learning_rate =1e-3
 hidden_dims=64
 learning_rate=1e-3
 
-early_stop_callback = EarlyStopping(
-monitor='val/Loss',
-min_delta=0.00,
-patience=3,
-verbose=True,
-mode='min'
-)
 
 def seed_torch(seed=0):
 	random.seed(seed)
@@ -168,8 +161,9 @@ class LitGNN(pl.LightningModule):
         overall_num_time = np.sum(overall_num.detach().cpu().numpy(), axis=0)
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
         overall_loss_time[np.isnan(overall_loss_time)]=0
-        self.log('test/loss', np.sum(overall_loss_time))
         #self.log('test/loss_per_sec', overall_loss_time) 
+        self.log('test/loss', np.sum(overall_loss_time))
+        
 
     '''             
     def test_epoch_end(self,test_results):
@@ -188,12 +182,12 @@ def sweep_train():
     config = wandb.config
     print('config: ', dict(config))
     wandb_logger = pl_loggers.WandbLogger(save_dir='./logs/')  #name=
-    train_dataloader=DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=8, collate_fn=collate_batch)
-    val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=8,collate_fn=collate_batch)
+    train_dataloader=DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
+    val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=12,collate_fn=collate_batch)
 
     print(config.model_type)
     if config.model_type == 'gat':
-        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop)
+        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop)
     elif config.model_type == 'gcn':
         model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout)
     elif config.model_type == 'gated':
@@ -201,8 +195,8 @@ def sweep_train():
 
     LitGNN_sys = LitGNN(model=model, lr=learning_rate, model_type= config.model_type)
 
-    #FOR debugging limit_train_batches=0.1, limit_val_batches=0.01
-    trainer = pl.Trainer(limit_train_batches=10, limit_val_batches=5, gpus=1, max_epochs=30,logger=wandb_logger, callbacks=[EarlyStopping(monitor='val/Loss')], precision=16,  profiler=True)  #precision=16, callbacks=[early_stop_callback],limit_train_batches=0.5, progress_bar_refresh_rate=20, 
+    
+    trainer = pl.Trainer(gpus=1, max_epochs=30,logger=wandb_logger, precision=16,  profiler=True)  #precision=16, callbacks=[early_stop_callback],limit_train_batches=0.5, progress_bar_refresh_rate=20, 
     
     print("############### TRAIN ####################")
     trainer.fit(LitGNN_sys, train_dataloader, val_dataloader)   
@@ -235,7 +229,7 @@ if __name__ == '__main__':
     #config = wandb.config
 
     sweep_config = {
-    "name": "Sweep gat dropout",
+    "name": "Sweep gat drop bn",
     "method": "grid",
     "metric": {
       'name': 'val/Loss',
@@ -250,19 +244,25 @@ if __name__ == '__main__':
                 "values": [64,128]
             },
             "hidden_dims": {
-                "values": [128, 256]
+                "values": [256]
             },
             "model_type": {
                 "values": ['gat']
             },
             "dropout": {
-                "values": [0., 0.25]
+                "values": [0.25]
             },
             "feat_drop": {
-                "values": [0., 0.1]
+                "values": [0.25, 0.1]
             },
             "attn_drop": {
-                "values": [0., 0.1]
+                "values": [0.25, 0.1]
+            },
+            "bn": {
+                "values": [True, False]
+            },
+            "bn_gat": {
+                "values": [True, False]
             }
         }
     }
