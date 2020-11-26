@@ -9,11 +9,16 @@ import numpy as np
 import dgl.function as fn
 
 class My_GATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, bn=True, feat_drop=0., attn_drop=0.):
+    def __init__(self, in_feats, out_feats, bn=True, feat_drop=0., attn_drop=0., att_ew=False):
         super(My_GATLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear_func = nn.Linear(in_feats, out_feats, bias=False)
-        self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
+        self.att_ew=att_ew
+        if att_ew:
+            self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
+        else:
+            self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
+
         self.feat_drop_l = nn.Dropout(feat_drop)
         self.attn_drop_l = nn.Dropout(attn_drop)
         self.bn = bn
@@ -31,7 +36,11 @@ class My_GATLayer(nn.Module):
         nn.init.xavier_normal_(self.attention_func.weight, gain=gain)
     
     def edge_attention(self, edges):
-        concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=-1) #(n_edg,6*64)||(n_edg,6*64) -> (n_edg,2*6*64) 
+        concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=-1) #(n_edg,hid)||(n_edg,hid) -> (n_edg,2*hid) 
+        
+        if self.att_ew:
+           concat_z = torch.cat([edges.src['z'], edges.dst['z'], edges.data['w']], dim=-1) 
+        
         src_e = self.attention_func(concat_z)  #(n_edg, 1) att logit
         src_e = F.leaky_relu(src_e)
         return {'e': src_e}
@@ -72,11 +81,11 @@ class My_GATLayer(nn.Module):
 
 
 class MultiHeadGATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, num_heads, merge='cat'):
+    def __init__(self, in_feats, out_feats, num_heads, merge='cat', bn=True, feat_drop=0., attn_drop=0., att_ew=False):
         super(MultiHeadGATLayer, self).__init__()
         self.heads = nn.ModuleList()
         for i in range(num_heads):
-            self.heads.append(My_GATLayer(in_feats, out_feats))
+            self.heads.append(My_GATLayer(in_feats, out_feats, bn=bn, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew))
         self.merge = merge
 
     def forward(self, g, h):
@@ -88,48 +97,45 @@ class MultiHeadGATLayer(nn.Module):
             # merge using average, for final layer
             return torch.mean(torch.stack(head_outs))
 
-class MLP_layer(nn.Module):
-    
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
-        self.layer1 = nn.Linear(input_dim, input_dim/2) 
-        self.layer2 = nn.Linear(input_dim/2, input_dim/4) 
-        
-    def forward(self, x):
-        y = x
-        y = self.layer1(y)
-        y = torch.relu(y)
-        y = self.layer2(y)
-        return y
-    
     
 class My_GAT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, bn=True, bn_gat=True, feat_drop=0., attn_drop=0., heads=4):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, bn_gat=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop, bn_gat)
-        self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop, bn_gat)
-        #self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, heads)
-        #self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, 1)
-        
-        self.linear1 = nn.Linear(hidden_dim, output_dim) #hidden*heads para multihead
+        self.embedding_e = nn.Linear(1, hidden_dim)
+        self.heads = heads
+        if heads == 1:
+            self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop, bn_gat,att_ew)
+            self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0., False,att_ew)
+            self.linear1 = nn.Linear(hidden_dim, output_dim)
+            self.batch_norm = nn.BatchNorm1d(hidden_dim)
+        else:
+            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, num_heads=heads, bn=bn_gat, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew)
+            self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
+            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, num_heads=1, bn=False, feat_drop=0., attn_drop=0., att_ew=att_ew)
+            self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
+            self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
+            
         #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
         
         if dropout:
             self.dropout_l = nn.Dropout(dropout)
         else:
             self.dropout_l = nn.Dropout(0.)
-        
-        self.batch_norm = nn.BatchNorm1d(hidden_dim)
         self.bn = bn
         
     def forward(self, g, h,e_w,snorm_n,snorm_e):
         
         # input embedding
-        h = self.embedding_h(h)  #input (70, 6,4) - (70, 6,32) checked
+        h = self.embedding_h(h)  #input (N, 24)- (N,hid)
+        e = self.embedding_e(e_w)
+        g.edata['w']=e
         # gat layers
         h = self.gat_1(g, h)
+        if self.heads > 1:
+            e = self.embedding_e2(e_w)
+            g.edata['w']=e
         h = self.gat_2(g, h)  #RELU DENTRO DE LA GAT_LAYER
         
         h = self.dropout_l(h)

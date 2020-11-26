@@ -63,12 +63,13 @@ def collate_batch(samples):
     return batched_graph, masks, snorm_n, snorm_e
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn'):
+    def __init__(self, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1):
         super().__init__()
         self.model= model
         self.lr = lr
         self.model_type = model_type
         self.batch_size = batch_size
+        self.wd = wd
         wandb.watch(self.model, log="all")
         
     
@@ -77,7 +78,7 @@ class LitGNN(pl.LightningModule):
         return pred
     
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=1e-3)
+        opt = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=self.wd)
         return opt
     
     def compute_RMSE_batch(self,pred, gt, mask): 
@@ -98,7 +99,7 @@ class LitGNN(pl.LightningModule):
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         feats = feats.view(feats.shape[0],-1)
         e_w = batched_graph.edata['w'].float()
-        if self.model_type == 'gated':
+        if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
         labels= batched_graph.ndata['gt'].float()
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
@@ -124,15 +125,17 @@ class LitGNN(pl.LightningModule):
         feats = batched_graph.ndata['x'].float()
         feats = feats.view(feats.shape[0],-1)
         e_w = batched_graph.edata['w'].float()
-        if self.model_type == 'gated':
+        if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
         labels= batched_graph.ndata['gt'].float()
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks)
-        #self.overall_num_list.extend(overall_num.detach().cpu().numpy()) #BV,T
-        #self.overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  
+        _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks)
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)#T
-        self.logger.agg_and_log_metrics({'val/Loss':np.sum(overall_loss_time)}, step= self.current_epoch)
+        
+        self.logger.experiment.log({ "val/rmse_loss": np.sum(overall_loss_time) }, step= self.current_epoch)
+        mse_overall_loss_time =np.sum(x2y2_error.detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)
+        
+        self.logger.agg_and_log_metrics({'val/Loss':np.sum(mse_overall_loss_time)}, step= self.current_epoch) #aggregate loss for epochs
         #self.log('val/Loss', np.sum(overall_loss_time) )
     '''    
     def validation_epoch_end(self, val_results):
@@ -148,20 +151,20 @@ class LitGNN(pl.LightningModule):
     def test_step(self, test_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e = test_batch
         feats = batched_graph.ndata['x'].float()
-        #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         feats = feats.view(feats.shape[0],-1)
         e_w = batched_graph.edata['w'].float()
-        if self.model_type == 'gated':
+        if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
         labels= batched_graph.ndata['gt'].float()
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks)
         #self.test_overall_num_list.extend(overall_num.detach().cpu().numpy())#BV,T
         #self.test_overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  #BV,T
-        overall_num_time = np.sum(overall_num.detach().cpu().numpy(), axis=0)
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
         overall_loss_time[np.isnan(overall_loss_time)]=0
-        #self.log('test/loss_per_sec', overall_loss_time) 
+        
+        self.logger.experiment.log({ "test/loss_per_sec": overall_loss_time })
+        
         self.log('test/loss', np.sum(overall_loss_time))
         
 
@@ -185,18 +188,21 @@ def sweep_train():
     train_dataloader=DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
     val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=12,collate_fn=collate_batch)
 
+
     print(config.model_type)
     if config.model_type == 'gat':
-        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop)
+        hidden_dims = round(config.hidden_dims / config.heads) 
+        model = My_GAT(input_dim=24, hidden_dim=hidden_dims, output_dim=12, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'gcn':
-        model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout)
+        model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn)
     elif config.model_type == 'gated':
         model = GatedGCN(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12)
 
-    LitGNN_sys = LitGNN(model=model, lr=learning_rate, model_type= config.model_type)
+    LitGNN_sys = LitGNN(model=model, lr=learning_rate, model_type= config.model_type, wd=config.wd)
 
-    
-    trainer = pl.Trainer(gpus=1, max_epochs=30,logger=wandb_logger, precision=16,  profiler=True)  #precision=16, callbacks=[early_stop_callback],limit_train_batches=0.5, progress_bar_refresh_rate=20, 
+    # Init ModelCheckpoint callback, monitoring 'val_loss'
+    #checkpoint_callback = ModelCheckpoint(monitor='val/Loss', mode='min')
+    trainer = pl.Trainer(gpus=1, max_epochs=40,logger=wandb_logger, precision=16, default_root_dir='./models_checkpoints/', profiler=True)  #precision=16, callbacks=[early_stop_callback],limit_train_batches=0.5, progress_bar_refresh_rate=20, 
     
     print("############### TRAIN ####################")
     trainer.fit(LitGNN_sys, train_dataloader, val_dataloader)   
@@ -214,7 +220,6 @@ if __name__ == '__main__':
     test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
     
     #train_dataloader=DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
-    val_dataloader=DataLoader(val_dataset, batch_size=64, shuffle=False,  num_workers=12, collate_fn=collate_batch)
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=12, collate_fn=collate_batch)  
     '''
     if model_type == 'gat':
@@ -229,41 +234,71 @@ if __name__ == '__main__':
     #config = wandb.config
 
     sweep_config = {
-    "name": "Sweep gat drop bn",
+    "name": "Sweep gat dropout bn wd multi_head att_ew",
     "method": "grid",
     "metric": {
-      'name': 'val/Loss',
-      'goal': 'minimize'   
+        'name': 'val/Loss',
+        'goal': 'minimize'   
     },
-    #"early_terminate": {
-    #    'type': 'hyperband',
-    #
-    #},
+    "early_terminate": {
+        'type': 'hyperband',
+        'min_iter': 3
+    },
     "parameters": {
             "batch_size": {
-                "values": [64,128]
+                #"distribution": 'int_uniform',
+                #"max": 512,
+                #"min": 64,
+                "values": [128]
             },
             "hidden_dims": {
+                #"distribution": 'int_uniform',
+                #"max": 512,
+                #"min": 64,
                 "values": [256]
             },
             "model_type": {
                 "values": ['gat']
             },
             "dropout": {
-                "values": [0.25]
+                #"distribution": 'uniform',
+                #"min": 0.1,
+                #"max": 0.5
+                "values": [0,0.1, 0.25]
             },
             "feat_drop": {
-                "values": [0.25, 0.1]
+                "values": [0.,0.2]
             },
             "attn_drop": {
-                "values": [0.25, 0.1]
+                "values": [0.,0.2]
             },
             "bn": {
+                "distribution": 'categorical',
                 "values": [True, False]
             },
             "bn_gat": {
+                "distribution": 'categorical',
                 "values": [True, False]
-            }
+            },
+            "wd": {
+                #"distribution": 'uniform',
+                #"max": 1,
+                #"min": 0.001,
+                "values": [0.01, 0.1, 0.25]
+            },
+            "heads": {
+                "values": [1,4]
+            },
+            "att_ew": {
+                "values": [ True, False]
+            }               
+            #"gcn_drop": {
+            #    "values": [0, 0.2]
+            #},
+            #"gcn_bn": {
+            #    "distribution": 'categorical',
+            #    "values": [True, False]
+            #}
         }
     }
 

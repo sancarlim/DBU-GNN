@@ -11,7 +11,7 @@ import dgl.function as fn
 gcn_msg=fn.u_mul_e('h', 'w', 'm') #elemnt-wise (broadcast)
 gcn_reduce = fn.sum(msg='m', out='h')
 class GCNLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, dropout):
+    def __init__(self, in_feats, out_feats, dropout, bn):
         super(GCNLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear = nn.Linear(in_feats, out_feats)
@@ -19,6 +19,8 @@ class GCNLayer(nn.Module):
             self.dropout = nn.Dropout(dropout)
         else:
             self.dropout = nn.Dropout(0.)
+        self.bn = bn
+        self.bn_node_h = nn.BatchNorm1d(out_feats)
         
     def reduce_func(self, nodes):
         h = torch.sum(nodes.mailbox['m'], dim=1)
@@ -56,7 +58,8 @@ class GCNLayer(nn.Module):
             h = h * norm
             
             h = g.ndata['h_s'] + h #Vx6xout_feats
-            
+            if self.bn:
+                self.bn_node_h(h)
             #h = h * (torch.ones_like(h)*snorm_n)  # normalize activation w.r.t. graph node size
             #e_w =  e_w * (torch.ones_like(e_w)*snorm_e)  # normalize activation w.r.t. graph edge size
             e_w =  e_w
@@ -64,24 +67,30 @@ class GCNLayer(nn.Module):
             return h, e_w
 
 class GCN(nn.Module):
-    def __init__(self, in_feats, hid_feats, out_feats, dropout):
+    def __init__(self, in_feats, hid_feats, out_feats, dropout, gcn_drop, bn,gcn_bn):
         super().__init__()
         self.embedding_h = nn.Linear(in_feats, hid_feats)
-        self.conv1 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
-        self.conv2 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats)
+        self.conv1 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats, dropout=gcn_drop, bn=gcn_bn)
+        self.conv2 = GCNLayer(in_feats=hid_feats, out_feats=hid_feats, dropout=False, bn=False)
         self.fc= nn.Linear(hid_feats,out_feats)
-        self.dropout = dropout
+        self.gcn_drop = gcn_drop
         if dropout:
             self.linear_dropout = nn.Dropout(dropout)
         else:
             self.linear_dropout =  nn.Dropout(0.)
+
+        self.batch_norm = nn.BatchNorm1d(hidden_dim)
+        self.bn = bn
+
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
         # input embedding
         h = self.embedding_h(inputs)
-        h,_ = self.conv1(graph, h,e_w,snorm_n, snorm_e,self.dropout) #Vx6x4 -> Vx6x32  
+        h,_ = self.conv1(graph, h,e_w,snorm_n, snorm_e) #Vx6x4 -> Vx6x32  
         h = F.relu(h)
-        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e,self.dropout)  #Vx6x2 
+        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e)  #Vx6x2 
         h = F.relu(h)
         h = self.linear_dropout(h)
+        if self.bn:
+            h = self.batch_norm(h)
         y = self.fc(h)
         return y

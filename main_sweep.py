@@ -134,7 +134,7 @@ def train(model, model_type, train_dataloader, val_dataloader, opt):
             feats=feats.view(feats.shape[0],-1)  #Nx18
             batch_e = batch_graphs.edata['w'].float().to(dev)
             #for GATED GCN
-            if model_type != 'gcn':
+            if model == 'gated':
                 batch_e=batch_e.view(batch_e.shape[0],1)
             #model = GatedGCN(input_dim=18, hidden_dim=256, output_dim=12).to(dev)
             batch_pred = model(batch_graphs.to(dev), feats, batch_e, batch_snorm_n.to(dev), batch_snorm_e.to(dev))
@@ -190,7 +190,7 @@ def val(model,  model_type, val_dataloader,val_loss_sum, epoch):
             feats = feats.view(feats.shape[0],-1)
             e_w = batched_graph.edata['w'].float().to(dev)
             
-            if model_type != 'gcn':
+            if model_type == 'gated':
                 e_w= e_w.view(e_w.shape[0],1)
             
             labels= batched_graph.ndata['gt'].float().to(dev)
@@ -221,7 +221,7 @@ def test(model, model_type, test_dataloader):
             feats = feats.view(feats.shape[0],-1)
             e_w = batched_graph.edata['w'].float().to(dev)
 
-            if model_type != 'gcn':
+            if model_type == 'gated':
                 e_w= e_w.view(e_w.shape[0],1)
 
             labels= batched_graph.ndata['gt'].float().to(dev)
@@ -244,31 +244,26 @@ def test(model, model_type, test_dataloader):
 
 
 def sweep_train():
-    wandb.init(project="dbu_graph")
+    wandb.init()
+    config = wandb.config
+    print('config: ', dict(config))
+    
+    train_dataloader=DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True,num_workers=12, collate_fn=collate_batch)
+    val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size,  shuffle=False,num_workers=12, collate_fn=collate_batch)
 
-    work_dir = './models_checkpoints'
-    model_type = 'gat'
-    hidden_dims=256
-    batch_size=64
-    base_lr=1e-3
-    total_epoch=20
-    dev='cuda:0'
-    train_dataloader=DataLoader(train_dataset, batch_size=batch_size, shuffle=True,num_workers=12, collate_fn=collate_batch)
-    val_dataloader=DataLoader(val_dataset, batch_size=batch_size,  shuffle=False,num_workers=12, collate_fn=collate_batch)
-
-    if model_type == 'gat':
-        model = My_GAT(input_dim=24, hidden_dim=hidden_dims, output_dim=12, heads=1, dropout=0.25, att_ew=True).to(dev)
-    elif model_type == 'gcn':
-        model = model = GCN(in_feats=24, hid_feats=hidden_dims, out_feats=12, dropout=0.25).to(dev)
-    elif model_type == 'gated':
-        model = GatedGCN(input_dim=24, hidden_dim=hidden_dims, output_dim=12).to(dev)
+    if config.model_type == 'gat':
+        model = My_GAT(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12,dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop).to(dev)
+    elif config.model_type == 'gcn':
+        model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout).to(dev)
+    elif config.model_type == 'gated':
+        model = GatedGCN(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12).to(dev)
 
     opt = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     print("############### TRAIN ####################")
-    train(model, model_type, train_dataloader,val_dataloader ,opt)
+    train(model, config.model_type, train_dataloader,val_dataloader ,opt)
     print("############### TEST ####################")
-    test(model, model_type, test_dataloader )
+    test(model,config.model_type, test_dataloader )
 
 
 
@@ -280,7 +275,39 @@ if __name__ == '__main__':
 
     
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch)
-    sweep_train()
+
+    sweep_config = {
+    "name": "Sweep gat dropout",
+    "method": "grid",
+    "metric": {
+    'name': 'val/Loss',
+    'goal': 'minimize'   
+            },
+    "parameters": {
+            "batch_size": {
+                "values": [64]
+            },
+            "hidden_dims": {
+                "values": [256]
+            },
+            "model_type": {
+                "values": ['gat']
+            },
+            "dropout": {
+                "values": [0.25]
+            },
+            "feat_drop": {
+                "values": [0.25, 0.1]
+            },
+            "attn_drop": {
+                "values": [0.25, 0.1]
+            }
+        }
+    }
+
+    sweep_id = wandb.sweep(sweep_config, project="dbu_graph")
+
+    wandb.agent(sweep_id, sweep_train)
     '''
     if model_type == 'gat':
         model = My_GAT(input_dim=18, hidden_dim=hidden_dims, output_dim=12).to(dev)
