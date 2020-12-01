@@ -77,24 +77,37 @@ class GatedGCN_layer(nn.Module):
 
 class GatedGCN(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, bn):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
         self.embedding_e = nn.Linear(1, hidden_dim)
         self.GatedGCN1 = GatedGCN_layer(hidden_dim, hidden_dim)
         self.GatedGCN2 = GatedGCN_layer(hidden_dim, hidden_dim)
         self.linear1 = nn.Linear(hidden_dim, output_dim)
+
+        if dropout:
+            self.linear_dropout = nn.Dropout(dropout)
+        else:
+            self.linear_dropout =  nn.Dropout(0.)
+
+        self.batch_norm = nn.BatchNorm1d(hidden_dim)
+        self.bn = bn
         
-    def forward(self, g, h, e, snorm_n, snorm_e):
+    def forward(self, g, inputs, e, snorm_n, snorm_e):
+
+        #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
+        inputs = inputs.view(inputs.shape[0],-1)
+
         # input embedding
-        h = self.embedding_h(h)
+        h = self.embedding_h(inputs)
         e = self.embedding_e(e)
         # graph convnet layers
         h, e = self.GatedGCN1(g, h, e, snorm_n, snorm_e)
         h, e = self.GatedGCN2(g, h, e, snorm_n, snorm_e)
         # MLP 
+        h = self.linear_dropout(h)
+        if self.bn:
+            h = self.batch_norm(h)
         y = self.linear1(h)
         
         return y
-
-print( GatedGCN(input_dim=18, hidden_dim=64, output_dim=12))

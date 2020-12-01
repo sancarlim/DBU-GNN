@@ -30,6 +30,7 @@ class GCNLayer(nn.Module):
         # Creating a local scope so that all the stored ndata and edata
         # (such as the `'h'` ndata below) are automatically popped out
         # when the scope exits.
+
         with g.local_scope():
             
             if self.dropout:
@@ -79,18 +80,26 @@ class GCN(nn.Module):
         else:
             self.linear_dropout =  nn.Dropout(0.)
 
-        self.batch_norm = nn.BatchNorm1d(hidden_dim)
+        self.batch_norm = nn.BatchNorm1d(hid_feats)
         self.bn = bn
 
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
+
+        #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
+        inputs = inputs.view(inputs.shape[0],-1)
+
         # input embedding
         h = self.embedding_h(inputs)
-        h,_ = self.conv1(graph, h,e_w,snorm_n, snorm_e) #Vx6x4 -> Vx6x32  
+
+        #Graph Conv
+        h,_ = self.conv1(graph, h,e_w,snorm_n, snorm_e) 
         h = F.relu(h)
-        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e)  #Vx6x2 
+        h,_ = self.conv2(graph,h,e_w,snorm_n, snorm_e) 
         h = F.relu(h)
+
         h = self.linear_dropout(h)
         if self.bn:
             h = self.batch_norm(h)
+        #Last linear layer    
         y = self.fc(h)
         return y

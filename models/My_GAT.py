@@ -57,7 +57,7 @@ class My_GATLayer(nn.Module):
         h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1)
         return {'h': h}
                                
-    def forward(self, g, h):
+    def forward(self, g, h,snorm_n):
         with g.local_scope():
             
             #feat dropout
@@ -88,8 +88,8 @@ class MultiHeadGATLayer(nn.Module):
             self.heads.append(My_GATLayer(in_feats, out_feats, bn=bn, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew))
         self.merge = merge
 
-    def forward(self, g, h):
-        head_outs = [attn_head(g, h) for attn_head in self.heads]
+    def forward(self, g, h, snorm_n):
+        head_outs = [attn_head(g, h,snorm_n) for attn_head in self.heads]
         if self.merge == 'cat':
             # concat on the output feature dimension (dim=1), for intermediate layers
             return torch.cat(head_outs, dim=1)
@@ -125,23 +125,30 @@ class My_GAT(nn.Module):
             self.dropout_l = nn.Dropout(0.)
         self.bn = bn
         
-    def forward(self, g, h,e_w,snorm_n,snorm_e):
+    def forward(self, g, feats,e_w,snorm_n,snorm_e):
         
+
+        #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
+        feats = feats.view(feats.shape[0],-1)
+
         # input embedding
-        h = self.embedding_h(h)  #input (N, 24)- (N,hid)
+        h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
         e = self.embedding_e(e_w)
         g.edata['w']=e
+
         # gat layers
-        h = self.gat_1(g, h)
+        h = self.gat_1(g, h,snorm_n)
         if self.heads > 1:
             e = self.embedding_e2(e_w)
             g.edata['w']=e
-        h = self.gat_2(g, h)  #RELU DENTRO DE LA GAT_LAYER
+        h = self.gat_2(g, h,snorm_n)  #RELU DENTRO DE LA GAT_LAYER
         
         h = self.dropout_l(h)
         if self.bn:
             h = self.batch_norm(h)
-        y = self.linear1(h)  # (6,32) -> (6,2)
+
+        #Last linear layer
+        y = self.linear1(h) 
         #y = self.linear2(torch.relu(y))
         return y
     
