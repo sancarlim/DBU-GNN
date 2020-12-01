@@ -15,9 +15,11 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from datetime import datetime
 from ApolloScape_Dataset import ApolloScape_DGLDataset
+from inD_Dataset import inD_DGLDataset
 from models.GCN import GCN 
 from models.My_GAT import My_GAT
 from models.Gated_GCN import GatedGCN
+from models.gnn_rnn import Model_GNN_RNN
 from tqdm import tqdm
 import random
 import wandb
@@ -28,12 +30,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 #from LIT_system import LitGNN
 
-batch_size=64
-total_epoch = 50
-learning_rate =1e-3
-hidden_dims=64
-learning_rate=1e-3
-
+dataset = 'ind'  #'apollo'
 
 def seed_torch(seed=0):
 	random.seed(seed)
@@ -78,38 +75,55 @@ class LitGNN(pl.LightningModule):
         return pred
     
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=self.wd)
+        opt = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
         return opt
     
     def compute_RMSE_batch(self,pred, gt, mask): 
-        pred=pred.view(pred.shape[0],mask.shape[1],-1)
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
         gt = gt*mask  # outputmask BV,T,C
         x2y2_error=torch.sum(torch.abs(pred-gt)**2,dim=-1) # x^2+y^2 BV,T
-        overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los V agentes
+        overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
         overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
         return overall_sum_time, overall_num, x2y2_error
 
-    
+    def compute_change_pos(self, feats,gt):
+        gt_vel = gt.detach().clone()
+        feats_vel = feats[:,:,:2].detach().clone()
+        new_mask_feats = (feats_vel[:, 1:,:2]!=0) * (feats_vel[:, :-1, :2]!=0) 
+        new_mask_gt = (gt_vel[:, 1:,:2]!=0) * (gt_vel[:, :-1, :2]!=0) 
+
+        gt_vel[:, 1:,:2] = (gt_vel[:, 1:,:2] - gt_vel[:, :-1, :2]).float() * new_mask_gt.float()
+        gt_vel[:, :1, :2] = (gt_vel[:, 0:1,:2] - feats_vel[:, -1:, :2]).float()
+        feats_vel[:, 1:,:2] = (feats_vel[:, 1:,:2] - feats_vel[:, :-1, :2]).float() * new_mask_feats.float()
+        feats_vel[:, 0, :2] = 0
+        
+        return feats_vel.float(), gt_vel.float()
+
     def training_step(self, train_batch, batch_idx):
         '''needs to return a loss from a single batch'''
 
         batched_graph, output_masks,snorm_n, snorm_e = train_batch
         feats = batched_graph.ndata['x'].float()
-        #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
-        feats = feats.view(feats.shape[0],-1)
+        labels= batched_graph.ndata['gt'][:,:,:2].float()
+        last_loc = feats[:,-1:,:2]
+        if dataset.lower() == 'apollo':
+            #USE CHANGE IN POS AS INPUT
+            feats_vel, labels_vel = self.compute_change_pos(feats,labels)
+            #Input pos + heading + vel
+            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+        
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
-        labels= batched_graph.ndata['gt'].float()
+
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-        overall_sum_time, overall_num, _ = self.compute_RMSE_batch(pred, labels, output_masks)  #(B,6)
+        pred=pred.view(pred.shape[0],labels.shape[1],-1)
+        overall_sum_time, overall_num, _ = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])  #(B,6)
         total_loss=torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2))
-        ##self.overall_loss_train.extend([total_loss.data.item()])
 
         # Log metrics
-        self.logger.agg_and_log_metrics({"Train/loss": total_loss.data.item()}, step=self.current_epoch)
-        #self.log("Train/loss",  total_loss.data.item(), on_step=False, on_epoch=True)
+        #self.logger.agg_and_log_metrics({"Train/loss": total_loss.data.item()}, step=self.current_epoch)
+        self.log("Sweep/train_loss",  total_loss.data.item(), on_step=False, on_epoch=True)
         return total_loss
     '''
     def training_epoch_end(self, total_loss):
@@ -123,20 +137,33 @@ class LitGNN(pl.LightningModule):
     def validation_step(self, val_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e = val_batch
         feats = batched_graph.ndata['x'].float()
-        feats = feats.view(feats.shape[0],-1)
+        labels= batched_graph.ndata['gt'][:,:,:2].float()
+        last_loc = feats[:,-1:,:2]
+        if dataset.lower() == 'apollo':
+            #USE CHANGE IN POS AS INPUT
+            feats_vel,_ = self.compute_change_pos(feats,labels)
+            #Input pos + heading + vel
+            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
-        labels= batched_graph.ndata['gt'].float()
+
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-        _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks)
+        pred=pred.view(pred.shape[0],labels.shape[1],-1)
+        '''
+        # Compute predicted trajs.
+        for i in range(1,feats.shape[1]):
+            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2  
+        pred += last_loc
+        '''
+        _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)#T
+        self.log( "Sweep/val_loss", np.sum(overall_loss_time) )
         
-        self.logger.experiment.log({ "val/rmse_loss": np.sum(overall_loss_time) }, step= self.current_epoch)
-        mse_overall_loss_time =np.sum(x2y2_error.detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)
-        
-        self.logger.agg_and_log_metrics({'val/Loss':np.sum(mse_overall_loss_time)}, step= self.current_epoch) #aggregate loss for epochs
-        #self.log('val/Loss', np.sum(overall_loss_time) )
+        mse_overall_loss_time =np.sum(np.sum(x2y2_error.detach().cpu().numpy(), axis=0)) / np.sum(np.sum(overall_num.detach().cpu().numpy(), axis=0)) 
+        #self.logger.agg_and_log_metrics({'val/Loss':mse_overall_loss_time}, step= self.current_epoch) #aggregate loss for epochs
+
     '''    
     def validation_epoch_end(self, val_results):
         overall_sum_time=np.sum(self.overall_x2y2_list,axis=0)  #BV,T->T RMSE medio en cada T
@@ -151,22 +178,34 @@ class LitGNN(pl.LightningModule):
     def test_step(self, test_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e = test_batch
         feats = batched_graph.ndata['x'].float()
-        feats = feats.view(feats.shape[0],-1)
+        labels= batched_graph.ndata['gt'][:,:,:2].float()
+        last_loc = feats[:,-1:,:2]
+        if dataset.lower() == 'apollo':
+            #USE CHANGE IN POS AS INPUT
+            feats_vel,_ = self.compute_change_pos(feats,labels)
+            #Input pos + heading + vel
+            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.view(e_w.shape[0],1)
-        labels= batched_graph.ndata['gt'].float()
+
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks)
+        pred=pred.view(pred.shape[0],labels.shape[1],-1)
+        # Compute predicted trajs.
+        '''
+        for i in range(1,feats.shape[1]):
+            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2 
+        pred += last_loc
+        '''
+        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])
         #self.test_overall_num_list.extend(overall_num.detach().cpu().numpy())#BV,T
         #self.test_overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  #BV,T
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
         overall_loss_time[np.isnan(overall_loss_time)]=0
         
-        self.logger.experiment.log({ "test/loss_per_sec": overall_loss_time })
-        
-        self.log('test/loss', np.sum(overall_loss_time))
-        
+        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:2]), "test/loss_2": torch.tensor(overall_loss_time[2:4]), "test/loss_3": torch.tensor(overall_loss_time[4:]) })
+ 
 
     '''             
     def test_epoch_end(self,test_results):
@@ -192,17 +231,20 @@ def sweep_train():
     print(config.model_type)
     if config.model_type == 'gat':
         hidden_dims = round(config.hidden_dims / config.heads) 
-        model = My_GAT(input_dim=24, hidden_dim=hidden_dims, output_dim=12, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = My_GAT(input_dim=30, hidden_dim=hidden_dims, output_dim=12, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'gcn':
-        model = model = GCN(in_feats=24, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn)
+        model = model = GCN(in_feats=30, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn)
     elif config.model_type == 'gated':
-        model = GatedGCN(input_dim=24, hidden_dim=config.hidden_dims, output_dim=12)
+        model = GatedGCN(input_dim=30, hidden_dim=config.hidden_dims, output_dim=12, dropout=config.dropout, bn=config.bn)
+    elif config.model_type == 'rnn':
+        model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=12, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
 
-    LitGNN_sys = LitGNN(model=model, lr=learning_rate, model_type= config.model_type, wd=config.wd)
+    LitGNN_sys = LitGNN(model=model, lr=config.learning_rate, model_type= config.model_type, wd=config.wd)
 
     # Init ModelCheckpoint callback, monitoring 'val_loss'
     #checkpoint_callback = ModelCheckpoint(monitor='val/Loss', mode='min')
-    trainer = pl.Trainer(gpus=1, max_epochs=40,logger=wandb_logger, precision=16, default_root_dir='./models_checkpoints/', profiler=True)  #precision=16, callbacks=[early_stop_callback],limit_train_batches=0.5, progress_bar_refresh_rate=20, 
+    early_stop_callback = EarlyStopping('Sweep/val_loss')
+    trainer = pl.Trainer(gpus=1, max_epochs=100, logger=wandb_logger, precision=16, default_root_dir='./models_checkpoints/', callbacks=[early_stop_callback], profiler=True)  #precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20, 
     
     print("############### TRAIN ####################")
     trainer.fit(LitGNN_sys, train_dataloader, val_dataloader)   
@@ -215,10 +257,17 @@ def sweep_train():
 
 if __name__ == '__main__':
 
-    train_dataset = ApolloScape_DGLDataset(train_val='train') #3447
-    val_dataset = ApolloScape_DGLDataset(train_val='val')  #919
-    test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
-    
+    if dataset.lower() == 'apollo':
+        train_dataset = ApolloScape_DGLDataset(train_val='train') #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val')  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
+    elif dataset.lower() == 'ind':
+        train_dataset = inD_DGLDataset(train_val='train') 
+        print('Train dataset length: {}'.format(len(train_dataset)))    
+        val_dataset = inD_DGLDataset(train_val='val')  
+        print('Val dataset length: {}'.format(len(val_dataset))) 
+        test_dataset = inD_DGLDataset(train_val='test')  
+        
     #train_dataloader=DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=12, collate_fn=collate_batch)  
     '''
@@ -234,17 +283,23 @@ if __name__ == '__main__':
     #config = wandb.config
 
     sweep_config = {
-    "name": "Sweep gat dropout bn wd multi_head att_ew",
+    "name": "GAT inD",
     "method": "grid",
     "metric": {
-        'name': 'val/Loss',
+        'name': 'Sweep/val_loss',
         'goal': 'minimize'   
     },
-    "early_terminate": {
-        'type': 'hyperband',
-        'min_iter': 3
-    },
+    #"early_terminate": {
+    #    'type': 'hyperband',
+    #    'min_iter': 3
+    #},
     "parameters": {
+            "learning_rate":{
+                #"distribution": 'uniform',
+                #"max": 1e-1,
+                #"min": 1e-5,
+                "values": [1e-2,1e-3]
+            },
             "batch_size": {
                 #"distribution": 'int_uniform',
                 #"max": 512,
@@ -264,41 +319,42 @@ if __name__ == '__main__':
                 #"distribution": 'uniform',
                 #"min": 0.1,
                 #"max": 0.5
-                "values": [0,0.1, 0.25]
+                "values": [0.1]
             },
             "feat_drop": {
-                "values": [0.,0.2]
+                "values": [0.]
             },
             "attn_drop": {
-                "values": [0.,0.2]
+                "values": [0.]
             },
             "bn": {
                 "distribution": 'categorical',
-                "values": [True, False]
+                "values": [False]
             },
             "bn_gat": {
                 "distribution": 'categorical',
-                "values": [True, False]
+                "values": [False]
             },
             "wd": {
                 #"distribution": 'uniform',
                 #"max": 1,
                 #"min": 0.001,
-                "values": [0.01, 0.1, 0.25]
+                "values": [0.1]
             },
             "heads": {
-                "values": [1,4]
+                "values": [1,3]
             },
             "att_ew": {
-                "values": [ True, False]
-            }               
-            #"gcn_drop": {
-            #    "values": [0, 0.2]
-            #},
-            #"gcn_bn": {
-            #    "distribution": 'categorical',
-            #    "values": [True, False]
-            #}
+                "distribution": 'categorical',
+                "values": [False]
+            },               
+            "gcn_drop": {
+                "values": [0.]
+            },
+            "gcn_bn": {
+                "distribution": 'categorical',
+                "values": [True]
+            }
         }
     }
 

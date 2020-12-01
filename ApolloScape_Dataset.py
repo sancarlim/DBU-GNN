@@ -44,24 +44,23 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 9, 10]  #x,y,heading,[visible_mask]
+        feature_id = [3, 4, 9]  #x,y,heading, QUITO [visible_mask]
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
-        mask_car=np.zeros((total_num,self.all_feature.shape[1],now_history_frame)) #NxVx6
+        mask_car=np.zeros((total_num,self.all_feature.shape[1],12)) #NxVx12
         for i in range(total_num):
             mask_car_t=np.array([1  if (j==2 or j==1) else 0 for j in object_type[i,:,5]])
-            mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(6) #120x6
-        
+            mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12) #120x12
+
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
 
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
         self.node_features = self.all_feature[:,:,:now_history_frame,feature_id]  #obj type,x,y 6 primeros frames
-        self.node_labels=self.all_feature[:,:,now_history_frame:,3:5] #x,y 6 ultimos frames
-        self.node_features[:,:,:,-1] *= mask_car   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
-        self.node_labels[:,:,:,-1] *= mask_car
-
+        self.node_labels=self.all_feature[:,:,now_history_frame:,feature_id] #x,y 6 ultimos frames
+        #self.node_features[:,:,:,-1] *= mask_car[:,:,:6]   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
+        
         '''
         scaler=StandardScaler()
         
@@ -70,8 +69,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         scaler.transform(scale_xy)
         self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
         '''
-
-        self.output_mask= self.all_feature[:,:,6:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+        self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
         self.output_mask = np.array(self.output_mask.unsqueeze_(-1) )
 
         #EDGES weights  #5010x120x120[]
@@ -79,7 +77,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
         # TRAIN VAL SETS
         # Remove empty rows from output mask 
-        zero_indeces_list = [i for i in range(len(self.output_mask)) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
+        zero_indeces_list = [i for i in range(len(self.output_mask[:,:,6:] )) if np.all(np.array(self.output_mask[:,:,6:] .squeeze(-1))==0, axis=(1,2))[i] == True ]
 
         id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
         total_valid_num = len(id_list)
@@ -113,12 +111,36 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             if graph.in_degrees(n) == 0:
                 graph.add_edges(n,n)
         '''
+        '''
+        #Data Augmentation
+        if self.train_val.lower() == 'train' and np.random.random()>0.5:
+            angle = 2 * np.pi * np.random.random()
+            sin_angle = np.sin(angle)
+            cos_angle = np.cos(angle)
+
+            angle_mat = np.array(
+                [[cos_angle, -sin_angle],
+                [sin_angle, cos_angle]])
+
+            xy = self.node_features[idx,:self.last_vis_obj[idx],:,:2]   #(V,T,C)
+            #num_xy = np.sum(xy.sum(axis=-1).sum(axis=-1) != 0) # get the number of valid data
+
+            # angle_mat: (2, 2), xy: (2, 12, 120)
+            out_xy = np.einsum('ab,vtb->vta', angle_mat, xy)
+            #now_mean_xy = np.matmul(angle_mat, now_mean_xy)
+            xy= out_xy
+
+            self.node_features[idx,:self.last_vis_obj[idx],:,:2] = torch.from_numpy(xy).type(torch.float32)
+        '''
+
+
+
         graph = dgl.add_self_loop(graph)
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
         norm_distances = [1/(i) if i!=0 else 1 for i in distances]
         graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)
-        graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] #obj type, x, y
+        graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
         graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
         output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]
         
