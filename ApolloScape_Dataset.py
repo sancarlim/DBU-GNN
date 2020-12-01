@@ -27,7 +27,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
             [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
         all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
-        self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)
+        self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
 
 
     def process(self):
@@ -47,10 +47,10 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         feature_id = [3, 4, 9]  #x,y,heading, QUITO [visible_mask]
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
-        mask_car=np.zeros((total_num,self.all_feature.shape[1],12)) #NxVx12
+        mask_car=np.zeros((total_num,self.all_feature.shape[1],12))#.to('cuda') #NxVx12
         for i in range(total_num):
-            mask_car_t=np.array([1  if (j==2 or j==1) else 0 for j in object_type[i,:,5]])
-            mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12) #120x12
+            mask_car_t=np.array([1  if (j==2 or j==1) else 0 for j in object_type[i,:,5]])#.to('cuda')
+            mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12)#.to('cuda') #120x12
 
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
@@ -135,11 +135,11 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
 
 
-        graph = dgl.add_self_loop(graph)
+        graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
         norm_distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)
+        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)#.to('cuda')
         graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
         graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
         output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]

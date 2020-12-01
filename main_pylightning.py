@@ -31,6 +31,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 #from LIT_system import LitGNN
 
 dataset = 'ind'  #'apollo'
+history_frames = 5
+future_frames= 3
+total_frames = history_frames + future_frames
 
 def seed_torch(seed=0):
 	random.seed(seed)
@@ -46,8 +49,8 @@ seed_torch()
 
 def collate_batch(samples):
     graphs, masks = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = np.vstack(masks)
-    masks = torch.tensor(masks)#+torch.zeros(2)
+    masks = torch.vstack(masks)
+
     #masks = masks.view(masks.shape[0],-1)
     #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
     sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
@@ -118,7 +121,7 @@ class LitGNN(pl.LightningModule):
 
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
-        overall_sum_time, overall_num, _ = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])  #(B,6)
+        overall_sum_time, overall_num, _ = self.compute_RMSE_batch(pred, labels, output_masks[:,history_frames:,:])  #(B,6)
         total_loss=torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2))
 
         # Log metrics
@@ -157,7 +160,7 @@ class LitGNN(pl.LightningModule):
             pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2  
         pred += last_loc
         '''
-        _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])
+        _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,history_frames:,:])
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)#T
         self.log( "Sweep/val_loss", np.sum(overall_loss_time) )
         
@@ -198,13 +201,13 @@ class LitGNN(pl.LightningModule):
             pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2 
         pred += last_loc
         '''
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,6:,:])
+        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,history_frames:,:])
         #self.test_overall_num_list.extend(overall_num.detach().cpu().numpy())#BV,T
         #self.test_overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  #BV,T
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
         overall_loss_time[np.isnan(overall_loss_time)]=0
         
-        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:2]), "test/loss_2": torch.tensor(overall_loss_time[2:4]), "test/loss_3": torch.tensor(overall_loss_time[4:]) })
+        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]) })
  
 
     '''             
@@ -225,19 +228,20 @@ def sweep_train():
     print('config: ', dict(config))
     wandb_logger = pl_loggers.WandbLogger(save_dir='./logs/')  #name=
     train_dataloader=DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
-    val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=12,collate_fn=collate_batch)
+    val_dataloader=DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=12, collate_fn=collate_batch)
 
+    input_dim = 30 if dataset.lower() == 'apollo' else 25
+    output_dim = 12 if dataset.lower() == 'apollo' else 6
 
-    print(config.model_type)
     if config.model_type == 'gat':
         hidden_dims = round(config.hidden_dims / config.heads) 
-        model = My_GAT(input_dim=30, hidden_dim=hidden_dims, output_dim=12, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'gcn':
-        model = model = GCN(in_feats=30, hid_feats=config.hidden_dims, out_feats=12, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn)
+        model = model = GCN(in_feats=input_dim, hid_feats=config.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn)
     elif config.model_type == 'gated':
-        model = GatedGCN(input_dim=30, hidden_dim=config.hidden_dims, output_dim=12, dropout=config.dropout, bn=config.bn)
+        model = GatedGCN(input_dim=input_dim, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'rnn':
-        model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=12, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
 
     LitGNN_sys = LitGNN(model=model, lr=config.learning_rate, model_type= config.model_type, wd=config.wd)
 
@@ -262,14 +266,14 @@ if __name__ == '__main__':
         val_dataset = ApolloScape_DGLDataset(train_val='val')  #919
         test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
     elif dataset.lower() == 'ind':
-        train_dataset = inD_DGLDataset(train_val='train') 
+        train_dataset = inD_DGLDataset(train_val='train') #12281
         print('Train dataset length: {}'.format(len(train_dataset)))    
-        val_dataset = inD_DGLDataset(train_val='val')  
+        val_dataset = inD_DGLDataset(train_val='val')  #3509
         print('Val dataset length: {}'.format(len(val_dataset))) 
-        test_dataset = inD_DGLDataset(train_val='test')  
+        test_dataset = inD_DGLDataset(train_val='test')  #1754
         
     #train_dataloader=DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=12, collate_fn=collate_batch)  
+    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch)  
     '''
     if model_type == 'gat':
         model = My_GAT(input_dim=18, hidden_dim=hidden_dims, output_dim=12)

@@ -32,7 +32,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
         all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
         #Choose frames in each sequence
-        self.all_feature=torch.from_numpy(all_feature[:,:70,:total_frames,:]).type(torch.float32)
+        self.all_feature=torch.from_numpy(all_feature[:,:70,:total_frames,:]).type(torch.float32)#.to('cuda')
 
 
     def process(self):
@@ -51,18 +51,18 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         now_history_frame=history_frames-1
         feature_id = [0,1,2,3,4] #pos heading vel
         object_type = self.all_feature[:,:,:,5].int()  # torch Tensor NxVxT
-        mask_car=np.zeros((total_num,self.all_feature.shape[1],total_frames)) #NxVx12
+        mask_car=torch.zeros((total_num,self.all_feature.shape[1],total_frames))#.to('cuda') #NxVx12
         for i in range(total_num):
-            mask_car_t=np.array([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])
-            mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(total_frames) #120x12
+            mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
+            mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(total_frames)#.to('cuda') #120x12
 
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
 
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
-        self.node_features = self.all_feature[:,:,:history_frames,feature_id]  #obj type,x,y 6 primeros frames
-        self.node_labels=self.all_feature[:,:,history_frames:,feature_id] #x,y 6 ultimos frames
+        self.node_features = self.all_feature[:,:,:history_frames,feature_id]  #obj type,x,y 5 primeros frames 5s
+        self.node_labels=self.all_feature[:,:,history_frames:,feature_id] #x,y 3 ultimos frames
         
         '''
         scaler=StandardScaler()
@@ -73,14 +73,14 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
         '''
         self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
-        self.output_mask = np.array(self.output_mask.unsqueeze_(-1) )  #(5010,120,T_hist,1)
+        self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
 
-        #EDGES weights  #5010x120x120[]
-        self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:], self.node_features[i][:,now_history_frame,:]) for i in range(len(self.all_feature))]  #5010x70x70
+        #EDGES weights  #Nx70x70
+        self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature))]  #5010x70x70
 
         # TRAIN VAL SETS
         # Remove empty rows from output mask 
-        zero_indeces_list = [i for i in range(len(self.output_mask[:,:,history_frames:])) if np.all(np.array(self.output_mask[:,:,history_frames:].squeeze(-1))==0, axis=(1,2))[i] == True ]
+        zero_indeces_list = [i for i in range(len(self.output_mask[:,:,history_frames:])) if np.all(self.output_mask[:,:,history_frames:].squeeze(-1).cpu().numpy()==0, axis=(1,2))[i] == True ]
 
         id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
         total_valid_num = len(id_list)
@@ -136,11 +136,11 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             self.node_features[idx,:self.last_vis_obj[idx],:,:2] = torch.from_numpy(xy).type(torch.float32)
         '''
 
-        graph = dgl.add_self_loop(graph)
+        graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
         norm_distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)
+        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)#.to('cuda')
         graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
         graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
         output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]
