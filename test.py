@@ -31,7 +31,7 @@ from LIT_system import LitGNN
 
 dataset = 'ind'  #'apollo'
 history_frames = 5
-future_frames= 3
+future_frames= 5
 total_frames = history_frames + future_frames
 
 
@@ -52,35 +52,32 @@ def collate_batch(samples):
 
 if __name__ == "__main__":
 
+
     if dataset.lower() == 'apollo':
-        test_dataset = ApolloScape_DGLDataset(train_val='test')  #230
+        test_dataset = ApolloScape_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames)  #230
     elif dataset.lower() == 'ind':
-        test_dataset = inD_DGLDataset(train_val='test')  #1754
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames)  #1754
 
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch)  
+    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=12, collate_fn=collate_batch)  
 
-    input_dim = 30 if dataset.lower() == 'apollo' else 25
-    output_dim = 12 if dataset.lower() == 'apollo' else 6
+    input_dim = 5*history_frames
+    output_dim = 2*future_frames
 
-    wandb.init(project='dbu_graph')
-    wandb_logger = pl_loggers.WandbLogger(save_dir='./logs/')
-    #wandb.config = {'hidden_dims'=128, 'heads'=3, ''}
-
-    hidden_dims = 256
+    hidden_dims = 511
     heads = 3
     model_type = 'gat'
 
     if model_type == 'gat':
         hidden_dims = round(hidden_dims/heads)
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=False, bn_gat=False, feat_drop=0, attn_drop=0, att_ew=False)
+        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=False, bn_gat=False, feat_drop=0, attn_drop=0, att_ew=True)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
-        model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim)
+        model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn= False)
     
 
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type='gat',wd=0.1)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/models_checkpoints/dry-sweep-4.ckpt',model=LitGCN_sys.model)
-    trainer = pl.Trainer(gpus=1, profiler=True, logger= wandb_logger)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/models_checkpoints/resilient-sweep-22.ckpt',model=LitGCN_sys.model)
+    trainer = pl.Trainer(gpus=1, profiler=True)
 
     trainer.test(LitGCN_sys, test_dataloaders=test_dataloader)

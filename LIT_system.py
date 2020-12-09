@@ -23,11 +23,12 @@ from tqdm import tqdm
 import random
 import wandb
 import pytorch_lightning as pl
+import statistics
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 dataset = 'ind'
 history_frames = 5
-future_frames= 3
+future_frames= 5
 total_frames = history_frames + future_frames
 
 
@@ -38,8 +39,13 @@ class LitGNN(pl.LightningModule):
         self.lr = lr
         self.model_type = model_type
         self.batch_size = batch_size
+        self.history_frames =history_frames
+        self.future_frames = future_frames
+        self.total_frames = history_frames + future_frames
         self.wd = wd
         self.overall_loss_time_list=[]
+        self.overall_long_err_list=[]
+        self.overall_lat_err_list=[]
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
         pred = self.model(graph, feats,e_w,snorm_n,snorm_e)   #inference
@@ -56,6 +62,14 @@ class LitGNN(pl.LightningModule):
         overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
         overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
         return overall_sum_time, overall_num, x2y2_error
+
+    def compute_long_lat_error(self,pred,gt,mask):
+        pred = pred*mask #B*V,T,C  (B n grafos en el batch)
+        gt = gt*mask  # outputmask BV,T,C
+        lateral_error = pred[:,:,0]-gt[:,:,0]
+        long_error = pred[:,:,1] - gt[:,:,1]  #BV,T
+        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
+        return lateral_error, long_error, overall_num
 
     def compute_change_pos(self, feats,gt):
         gt_vel = gt.detach().clone()
@@ -147,18 +161,38 @@ class LitGNN(pl.LightningModule):
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,history_frames:,:])
-        #self.test_overall_num_list.extend(overall_num.detach().cpu().numpy())#BV,T
-        #self.test_overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy())  #BV,T
+        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
+        long_err, lat_err, _ = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
         overall_loss_time[np.isnan(overall_loss_time)]=0
-        print('per sec loss:{}, Sum{}'.format(overall_loss_time, np.sum(overall_loss_time)))
+        overall_long_err = np.sum(long_err.detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
+        overall_lat_err = np.sum(lat_err.detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
+        overall_long_err[np.isnan(overall_long_err)]=0
+        overall_lat_err[np.isnan(overall_lat_err)]=0
+        #print('per sec loss:{}, Sum{}'.format(overall_loss_time, np.sum(overall_loss_time)))
+        #print('per sec long_err:{}, Sum{}'.format(overall_long_err, np.sum(overall_long_err)))
+        #print('per sec lat_err:{}, Sum{}'.format(overall_lat_err, np.sum(overall_lat_err)))
         self.overall_loss_time_list.append(overall_loss_time)
+        self.overall_long_err_list.append(overall_long_err)
+        self.overall_lat_err_list.append(overall_lat_err)
         self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]) })
- 
+        if self.future_frames == 5:
+            self.log_dict({ "test/loss_4": torch.tensor(overall_loss_time[3:4]), "test/loss_5": torch.tensor(overall_loss_time[4:])})
+
 
     def on_test_epoch_end(self):
         overall_loss_time = np.array(self.overall_loss_time_list)
         avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        var = [sum(abs(overall_loss_time[:,i]-avg[i]))/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        print('Loss variance: ' , var)
+        var = [sum((overall_loss_time[:,i]-avg[i])**2)/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
+        print('Loss avg: ',avg)
+        print('Loss variance: ',var)
+
+        overall_long_err = np.array(self.overall_long_err_list)
+        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+        
+        overall_lat_err = np.array(self.overall_lat_err_list)
+        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
+        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
+        print('\n'.join('Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+        print('\n'.join('Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
