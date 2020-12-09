@@ -64,11 +64,10 @@ class Seq2Seq(nn.Module):
 		encoded_output, hidden = self.encoder(in_data)  #enc_out (N,L,2*30) hidden (N,S,Hout) Hout=2*30
 		decoder_input = last_location
 		for t in range(self.pred_length):
-			# encoded_input = torch.cat((now_label, encoded_input), dim=-1) # merge class label into input feature
 			now_out, hidden = self.decoder(decoder_input, hidden)  #dec_inp (N,L,Hin) - L seq length (1) Hin=2  |  hidden (N,S,Hout) S=6 Hout=2*30
 			now_out += decoder_input  #output is change in pos (BV,T,2)
 			outputs[:,t:t+1] = now_out
-			decoder = now_out
+			decoder_input = now_out
 		return outputs
 
 ####################################################

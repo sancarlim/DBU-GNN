@@ -12,11 +12,12 @@ from models.seq2seq import Seq2Seq
     
 class Model_GNN_RNN(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, bn_gat=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False):
+    def __init__(self, input_dim, hidden_dim, output_dim, pred_length=3,dropout=0.2, bn=True, bn_gat=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
         self.embedding_e = nn.Linear(1, hidden_dim)
         self.heads = heads
+        self.pred_length = pred_length
         if heads == 1:
             self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop, bn_gat,att_ew)
             self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0., False,att_ew)
@@ -55,7 +56,7 @@ class Model_GNN_RNN(nn.Module):
         if self.bn:
             h = self.batch_norm(h)
         '''
-        y = self.seq2seq(in_data=h, last_location=inputs[:,-1:,:2], pred_length=6)  # (BV,6,hid) -> (BV,6,2)
+        y = self.seq2seq(in_data=h, last_location=inputs[:,-1:,:2], pred_length=self.pred_length)  # (BV,6,hid) -> (BV,6,2)
         #y = self.linear2(torch.relu(y))
         return y
     
