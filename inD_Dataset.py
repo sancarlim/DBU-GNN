@@ -13,84 +13,100 @@ import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
 
-history_frames = 5 # 5 second * 1 frame/second
-future_frames = 3 # 3 second * 1 frame/second
-total_frames = history_frames + future_frames
+#history_frames = 3 # 5 second * 1 frame/second
+#future_frames = 3 # 3 second * 1 frame/second
+#total_frames = history_frames + future_frames
 neighbor_distance = 10
 max_num_object = 120 #per frame
-total_feature_dimension = 7 #pos,heading,vel,class, mask
+total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
 
 class inD_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val, data_path=None):
-        self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_data.pkl'
+    def __init__(self, train_val, history_frames, future_frames, data_path=None):
+        self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data.pkl'
+        self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data.pkl'
         self.train_val=train_val
+        self.history_frames = history_frames
+        self.future_frames = future_frames
+        self.total_frames = history_frames + future_frames
         self.process()        
 
     def load_data(self):
-        with open(self.raw_dir, 'rb') as reader:
-            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
-        all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
-        #Choose frames in each sequence
-        self.all_feature=torch.from_numpy(all_feature[:,:70,:total_frames,:]).type(torch.float32)#.to('cuda')
-
+        if self.train_val.lower() == 'train':
+            with open(self.raw_dir_train, 'rb') as reader:
+                [all_feature_train, self.all_adjacency_train, self.all_mean_xy_train]= pickle.load(reader)
+            all_feature_train=np.transpose(all_feature_train, (0,3,2,1)) #(N,V,T,C)
+            #Choose frames in each sequence
+            self.all_feature_train=torch.from_numpy(all_feature_train[:,:50,:self.total_frames,:]).type(torch.float32)#.to('cuda')
+        else:
+            with open(self.raw_dir_val, 'rb') as reader:
+                [all_feature_val, self.all_adjacency_val, self.all_mean_xy_val]= pickle.load(reader)
+            all_feature_val=np.transpose(all_feature_val, (0,3,2,1))
+            self.all_feature_val=torch.from_numpy(all_feature_val[:,:50,:self.total_frames,:]).type(torch.float32)
 
     def process(self):
-        #process data to graph, labels, and splitting masks
         self.load_data()
-        total_num = len(self.all_feature)
         
-        self.last_vis_obj=[]   #contains number of visible objects in each sequence of the training, i.e. objects in frame 5
-        #para hacer grafos de tamaño variable
-        for idx in range(len(self.all_adjacency)): 
-            for i in range(len(self.all_adjacency[idx])): 
-                if self.all_adjacency[idx][i,i] == 0:
-                    self.last_vis_obj.append(i)
-                    break   
+        if self.train_val.lower() == 'train':
+            total_num = len(self.all_feature_train)
+            
+            self.last_vis_obj=[]   
+            for idx in range(len(self.all_adjacency_train)): 
+                for i in range(len(self.all_adjacency_train[idx])): 
+                    if self.all_adjacency_train[idx][i,i] == 0:
+                        self.last_vis_obj.append(i)
+                        break   
+            
+            now_history_frame=self.history_frames-1
+            feature_id = [0,1,2,3,4] #pos heading vel 
+            object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
+            mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx12
+            for i in range(total_num):
+                mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
+                mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
+ 
+            #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
+            self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]  #x,y,heading,vx,vy 5 primeros frames 5s
+            self.node_labels=self.all_feature_train[:,:,self.history_frames:,feature_id] #x,y 3 ultimos frames    
+            self.output_mask= self.all_feature_train[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
+            self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
+            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature_train))]  #5010x70x70
+
+            id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
+            self.train_id_list = np.random.permutation(id_list)
+
+        else:
+            total_num = len(self.all_feature_val)
+            
+            self.last_vis_obj=[]   
+            for idx in range(len(self.all_adjacency_val)): 
+                for i in range(len(self.all_adjacency_val[idx])): 
+                    if self.all_adjacency_val[idx][i,i] == 0:
+                        self.last_vis_obj.append(i)
+                        break   
+            
+            now_history_frame=self.history_frames-1
+            feature_id = [0,1,2,3,4] #pos heading vel 
+            object_type = self.all_feature_val[:,:,:,-2].int()  # torch Tensor NxVxT
+            mask_car=torch.zeros((total_num,self.all_feature_val.shape[1],self.total_frames))#.to('cuda') #NxVx12
+            for i in range(total_num):
+                mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
+                mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
+ 
+            self.node_features = self.all_feature_val[:,:,:self.history_frames,feature_id]  #x,y,heading,vx,vy 5 primeros frames 5s
+            self.node_labels=self.all_feature_val[:,:,self.history_frames:,feature_id] #x,y 3 ultimos frames    
+            self.output_mask= self.all_feature_val[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
+            self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
+            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature_val))]  #5010x70x70
+
+            id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
+            total_valid_num = len(id_list)
+            ind=np.random.permutation(id_list)
+            self.val_id_list, self.test_id_list = ind[:round(total_valid_num*0.67)], ind[round(total_valid_num*0.67):]
         
-        now_history_frame=history_frames-1
-        feature_id = [0,1,2,3,4] #pos heading vel
-        object_type = self.all_feature[:,:,:,5].int()  # torch Tensor NxVxT
-        mask_car=torch.zeros((total_num,self.all_feature.shape[1],total_frames))#.to('cuda') #NxVx12
-        for i in range(total_num):
-            mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
-            mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(total_frames)#.to('cuda') #120x12
-
-        #rescale_xy=torch.ones((1,1,1,2))
-        #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
-        #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
-
-        #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
-        self.node_features = self.all_feature[:,:,:history_frames,feature_id]  #obj type,x,y 5 primeros frames 5s
-        self.node_labels=self.all_feature[:,:,history_frames:,feature_id] #x,y 3 ultimos frames
-        
-        '''
-        scaler=StandardScaler()
-        
-        scale_xy=self.node_features[:,:,:,:2].reshape(self.node_features[:,:,:,:2].shape[0]*self.node_features[:,:,:,:2].shape[1],-1)  #NxV,T*C(x,y)
-        scaler.fit(scale_xy)
-        scaler.transform(scale_xy)
-        self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
-        '''
-        self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
-        self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
-
-        #EDGES weights  #Nx70x70
-        self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature))]  #5010x70x70
-
         # TRAIN VAL SETS
-        # Remove empty rows from output mask 
-        zero_indeces_list = [i for i in range(len(self.output_mask[:,:,history_frames:])) if np.all(self.output_mask[:,:,history_frames:].squeeze(-1).cpu().numpy()==0, axis=(1,2))[i] == True ]
-
-        id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
-        total_valid_num = len(id_list)
-        #ind=np.random.permutation(id_list)
-        ind = id_list
-        self.train_id_list, self.val_id_list, self.test_id_list = ind[:round(total_valid_num*0.7)], ind[round(total_valid_num*0.7):round(total_valid_num*0.9)],ind[round(total_valid_num*0.9):]
-
-        #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
-        #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
-
+        # Remove empty rows from output mask . En inD esto no va a pasar (muchos más agentes)
+        #zero_indeces_list = [i for i in range(len(self.output_mask[:,:,history_frames:])) if np.all(self.output_mask[:,:,history_frames:].squeeze(-1).cpu().numpy()==0, axis=(1,2))[i] == True ]
 
     def __len__(self):
         if self.train_val.lower() == 'train':
@@ -103,10 +119,14 @@ class inD_DGLDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.train_val.lower() == 'train':
             idx = self.train_id_list[idx]
+            self.all_adjacency = self.all_adjacency_train
         elif self.train_val.lower() == 'val':
             idx = self.val_id_list[idx]
+            self.all_adjacency = self.all_adjacency_val
         else:
             idx = self.test_id_list[idx]
+            self.all_adjacency = self.all_adjacency_val
+
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
         '''
