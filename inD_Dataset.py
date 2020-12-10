@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import utils
 os.environ['DGLBACKEND'] = 'pytorch'
 from torchvision import datasets, transforms
 import scipy.sparse as spp
@@ -17,18 +18,19 @@ from sklearn.preprocessing import StandardScaler
 #future_frames = 3 # 3 second * 1 frame/second
 #total_frames = history_frames + future_frames
 neighbor_distance = 10
-max_num_object = 120 #per frame
+max_num_object = 70 #per frame
 total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
 
 class inD_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val, history_frames, future_frames, data_path=None):
+    def __init__(self, train_val, history_frames, future_frames, grip_model=False, data_path=None):
         self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data.pkl'
         self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data.pkl'
         self.train_val=train_val
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
+        self.grip_model = grip_model
         self.process()        
 
     def load_data(self):
@@ -37,12 +39,12 @@ class inD_DGLDataset(torch.utils.data.Dataset):
                 [all_feature_train, self.all_adjacency_train, self.all_mean_xy_train]= pickle.load(reader)
             all_feature_train=np.transpose(all_feature_train, (0,3,2,1)) #(N,V,T,C)
             #Choose frames in each sequence
-            self.all_feature_train=torch.from_numpy(all_feature_train[:,:50,:self.total_frames,:]).type(torch.float32)#.to('cuda')
+            self.all_feature_train=torch.from_numpy(all_feature_train[:,:,:self.total_frames,:]).type(torch.float32)#.to('cuda')
         else:
             with open(self.raw_dir_val, 'rb') as reader:
                 [all_feature_val, self.all_adjacency_val, self.all_mean_xy_val]= pickle.load(reader)
             all_feature_val=np.transpose(all_feature_val, (0,3,2,1))
-            self.all_feature_val=torch.from_numpy(all_feature_val[:,:50,:self.total_frames,:]).type(torch.float32)
+            self.all_feature_val=torch.from_numpy(all_feature_val[:,:,:self.total_frames,:]).type(torch.float32)
 
     def process(self):
         self.load_data()
@@ -59,6 +61,10 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             
             now_history_frame=self.history_frames-1
             feature_id = [0,1,2,3,4] #pos heading vel 
+            
+            if self.grip_model:
+                feature_id = [0,1,2,-1]
+
             object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
             mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx12
             for i in range(total_num):
@@ -120,12 +126,15 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         if self.train_val.lower() == 'train':
             idx = self.train_id_list[idx]
             self.all_adjacency = self.all_adjacency_train
+            self.all_mean_xy = self.all_mean_xy_train
         elif self.train_val.lower() == 'val':
             idx = self.val_id_list[idx]
             self.all_adjacency = self.all_adjacency_val
+            self.all_mean_xy = self.all_mean_xy_val
         else:
             idx = self.test_id_list[idx]
             self.all_adjacency = self.all_adjacency_val
+            self.all_mean_xy = self.all_mean_xy_val
 
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
@@ -165,4 +174,14 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
         output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]
         
-        return graph, output_mask
+        if self.grip_model:
+            now_feature = self.node_features[idx].permute(2,1,0) # GRIP (C, T, V) = (N, 11, 12, 120)
+            now_gt = self.node_labels[idx]  # V T C
+            now_mean_xy = self.all_mean_xy[idx]# (2,) = (x, y) 
+            now_adjacency = utils.get_adjacency(A=self.all_adjacency[idx])
+            #now_A = utils.normalize_adjacency(now_adjacency)
+            now_A = torch.from_numpy(now_adjacency).type(torch.float32)
+            output_mask = self.output_mask[idx] # V T C
+            return now_feature, now_gt, now_A, now_mean_xy, output_mask
+        else:
+            return graph, output_mask
