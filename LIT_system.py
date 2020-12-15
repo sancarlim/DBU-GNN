@@ -22,6 +22,7 @@ from models.Gated_GCN import GatedGCN
 from tqdm import tqdm
 import random
 import wandb
+import pandas as pd
 import pytorch_lightning as pl
 import statistics
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -46,6 +47,15 @@ class LitGNN(pl.LightningModule):
         self.overall_loss_time_list=[]
         self.overall_long_err_list=[]
         self.overall_lat_err_list=[]
+
+        #For visualization purposes
+        self.pred_x_list = []
+        self.pred_y_list = []
+        self.gt_x_list = []
+        self.gt_y_list = []
+        self.feats_x_list = []
+        self.feats_y_list = []
+        self.track_info_list = []
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
         pred = self.model(graph, feats,e_w,snorm_n,snorm_e)   #inference
@@ -144,7 +154,7 @@ class LitGNN(pl.LightningModule):
 
 
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e = test_batch
+        batched_graph, output_masks,snorm_n, snorm_e, track_info, mean_xy = test_batch
         feats = batched_graph.ndata['x'].float()
         labels= batched_graph.ndata['gt'][:,:,:2].float()
         last_loc = feats[:,-1:,:2]
@@ -160,6 +170,13 @@ class LitGNN(pl.LightningModule):
 
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
+
+        #For visualization purposes
+        self.gt_x_list.append((labels[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
+        self.gt_y_list.append((labels[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
+        self.pred_x_list.append((pred[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  #Lista donde cada elemento array (V*T_pred) (V1,V2,V3...)
+        self.pred_y_list.append((pred[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  
+        self.track_info_list.append(track_info[:,history_frames:total_frames,:].reshape(-1,track_info.shape[-1])) # V*T_pred, 6 (recording_id,frame,id, l,w,class)
         
         _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         long_err, lat_err, _ = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
@@ -196,3 +213,22 @@ class LitGNN(pl.LightningModule):
         var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
         print('\n'.join('Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
         print('\n'.join('Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+
+        #For visualization purposes
+        recording_id_list = [self.track_info_list[i][:,0] for i in range(len(self.track_info_list))]  # lista de 1935[n_seq] arrays(V_seq,T_pred) Recording is the same for all V, but can change in the sequence (5 frames from 2 dif recordings)
+        frame_id_list =  [self.track_info_list[i][:,1] for i in range(len(self.track_info_list))] #(V_seqxT_pred)
+        obj_id_list = [self.track_info_list[i][:,2] for i in range(len(self.track_info_list))] #V,T
+        track_vis_dict = {
+            'pred_x': np.concatenate(self.pred_x_list,axis=0),
+            'pred_y': np.concatenate(self.pred_y_list,axis=0),
+            'gt_x': np.concatenate(self.gt_x_list,axis=0),
+            'gt_y': np.concatenate(self.gt_y_list,axis=0),
+            'recording_id': np.concatenate(recording_id_list,axis=0),
+            'frame_id': np.concatenate(frame_id_list,axis=0),
+            'obj_id': np.concatenate(obj_id_list,axis=0)
+        }
+
+        
+        df_vis = pd.DataFrame.from_dict(track_vis_dict)   #1935(xVxTpred)x5
+        print(df_vis.head())
+        #df_vis.to_csv('/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/22_preds_sinsolape.csv')
