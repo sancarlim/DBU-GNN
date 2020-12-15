@@ -56,12 +56,13 @@ def read_tracks(track_file, meta_info):
     df = pandas.read_csv(track_file)
     df_meta = pandas.read_csv(meta_info)
     
-    #filter some of the parked vehicles in 3rd intersection
-    if df_meta.recordingId[0] > 17 and df_meta.recordingId[0] < 30: 
+    #filter some of the parked vehicles , EXCEPT FOR VISUALIZATION
+    if test == False:
         max_num_frames = df_meta['numFrames'].max()
         id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
         del id_parked_objects[-2:]  #keep 2 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
+    
 
     # To extract every track, group the rows by the track id
     raw_tracks = df.groupby(["frame"], sort=False)
@@ -249,8 +250,8 @@ def process_data(tracks,static_info, start_ind, end_ind, observed_last):
     # object feature with a shape of (frame#, object#, 6) -> (V, T, C)
     object_frame_feature = np.zeros((max_num_object, end_ind-start_ind, total_feature_dimension))
     object_frame_feature[:num_visible_object+num_non_visible_object] = np.transpose(object_feature_list, (1,0,2))
-
-    return object_frame_feature, neighbor_matrix, m_xy
+    visible_object_indexes = [list(now_all_object_id).index(i) for i in visible_object_id_list]
+    return object_frame_feature, neighbor_matrix, m_xy, visible_object_indexes
 
 def generate_train_data(file_track_path, file_static_path):
     '''
@@ -270,51 +271,59 @@ def generate_train_data(file_track_path, file_static_path):
     all_feature_list = []
     all_adjacency_list = []
     all_mean_list = []
-    for start_ind in frame_id_set[:-total_frames+1:2]:  #recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
+    visible_object_indexes_list=[]
+    step = 3 if test else 2
+    for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
         observed_last = start_ind + (history_frames-1)
-        object_frame_feature, neighbor_matrix, mean_xy = process_data(tracks, static_info, start_ind, end_ind, observed_last)  #N=1
+        object_frame_feature, neighbor_matrix, mean_xy, visible_object_indexes = process_data(tracks, static_info, start_ind, end_ind, observed_last)  #N=1
 
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
-        all_mean_list.append(mean_xy)	
+        all_mean_list.append(mean_xy)
+        visible_object_indexes_list.append(visible_object_indexes)
 
     # (N, V, T, C) --> (N, C, T, V)
     all_feature_list = np.transpose(all_feature_list, (0, 3, 2, 1))
     all_adjacency_list = np.array(all_adjacency_list)
     all_mean_list = np.array(all_mean_list)
+    visible_object_indexes_list = np.array(visible_object_indexes_list)
     print(all_feature_list.shape)   #N= nº de secuencias (10 frames) en cada fichero - nºtotal=Nx*nºficheros
-    return all_feature_list, all_adjacency_list, all_mean_list
+    return all_feature_list, all_adjacency_list, all_mean_list,visible_object_indexes_list
 
 
 def generate_data(file_tracks_list, file_static_list):
     all_data = []
     all_adjacency = []
     all_mean_xy = []
+    all_visible_object_indexes=[]
 
     for track_file, static_file in zip(file_tracks_list, file_static_list):
-        now_data, now_adjacency, now_mean_xy = generate_train_data(track_file,static_file)
+        now_data, now_adjacency, now_mean_xy, now_visible_object_indexes = generate_train_data(track_file,static_file)
         all_data.extend(now_data)
         all_adjacency.extend(now_adjacency)
         all_mean_xy.extend(now_mean_xy)
+        all_visible_object_indexes.extend(now_visible_object_indexes)
 
     all_data = np.array(all_data) #(N, C, T, V)=(5010, 11, 12, 70) Train
     all_adjacency = np.array(all_adjacency) #(5010, 70, 70) Train
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
+    all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = './ind_train_data.pkl'
+    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/22test_sinsolape_data.pkl'
     with open(save_path, 'wb') as writer:
-        pickle.dump([all_data, all_adjacency, all_mean_xy], writer)
+        pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')
 
 
 if __name__ == '__main__':
 
-    input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/train_data/'
-    tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracks.csv")))
-    static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracksMeta.csv")))
-    recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "*_recordingMeta.csv")))
+    test = True
+    input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'
+    tracks_files = sorted(glob.glob(os.path.join(input_root_path , "22_tracks.csv")))
+    static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "22_tracksMeta.csv")))
+    recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "22_recordingMeta.csv")))
     generate_data(tracks_files, static_tracks_files)
     
     
