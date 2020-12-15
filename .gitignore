@@ -144,3 +144,6 @@ wandb
 
 #checkpoints
 /models_checkpoints
+
+#figures
+/Figures

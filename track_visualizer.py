@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import skimage.io
 from matplotlib.widgets import Button, Slider
+import pandas as pd
+from scipy.interpolate import interp1d
 from loguru import logger
 
 
@@ -24,7 +26,8 @@ class TrackVisualizer(object):
         self.preds = preds
         self.static_info = static_info
         self.meta_info = meta_info
-        self.maximum_frames = np.max([self.static_info[track["trackId"]]["finalFrame"] for track in self.tracks])
+        static_info_df = pd.DataFrame.from_dict(self.static_info)
+        self.maximum_frames = static_info_df['numFrames'].max()  #self.maximum_frames = np.max([self.static_info[track["trackId"]]["finalFrame"] for track in self.tracks])
 
         # Save ids for each frame
         self.ids_for_frame = {}
@@ -209,11 +212,6 @@ class TrackVisualizer(object):
             bounding_box = track["bboxVis"][current_index] / self.scale_down_factor
             center_points = track["centerVis"] / self.scale_down_factor
             pred_center_points = pred["centerVis"] / self.scale_down_factor 
-            #Polynomial fit
-            #if pred_center_points.max() != 0:
-            #    coefs = np.polyfit(pred_center_points[:,0],pred_center_points[:,1],3)
-            #    pred_center_points =np.array([list(pred_center_points[:,0]), list(np.polyval(coefs,pred_center_points[:,0]))]).transpose() 
-
             center_point = center_points[current_index]
             pred_exists = np.where(pred['frame_id']==self.current_frame)[0].size != 0 #if pred_exists else False
             #pred_center_point = pred_center_points[np.where(pred['frame_id']==self.current_frame)[0][0]]  ##if we don't have pred for this frame .size == 0
@@ -270,10 +268,24 @@ class TrackVisualizer(object):
                         '''
                         #Plot predictions
                         if pred_exists:
-                            print(self.current_frame, pred_center_points.shape,track_ind)
+                            #Polynomial fit
+                            draw_pred=np.concatenate( (pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][::3], pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][-1].reshape(-1,2)), axis=0)
+                            if draw_pred.max() != 0  and len(draw_pred)>3:
+                                #coefs = np.polyfit(draw_pred[:,0],draw_pred[:,1],3)
+                                #draw_pred =np.array([list(draw_pred[:,0]), list(np.polyval(coefs,draw_pred[:,0]))]).transpose() 
+                                t = np.arange(len(draw_pred))
+                                ti = np.linspace(0, t.max(), 10 * t.size)
+                                xi = interp1d(t, draw_pred[:,0], kind='cubic')(ti)   #spline, quadratic, cubic interpolation of 1st, 2nd, 3rd order 
+                                yi = interp1d(t, draw_pred[:,1], kind='cubic')(ti)
+                                draw_pred =np.array([list(xi), list(yi)]).transpose()
+                            print(self.current_frame, draw_pred.shape,track_ind)
                             plotted_centroids_pred = self.ax.plot(
-                                pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 0],
-                                pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 1], 
+                                #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 0],
+                                #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 1], 
+                                #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 0],
+                                #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 1], 
+                                draw_pred[:,0],
+                                draw_pred[:,1],
                                 **self.track_style_pred)
                             plotted_objects.append(plotted_centroids_pred)
 

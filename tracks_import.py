@@ -85,12 +85,12 @@ def read_preds(pred_file, meta_info):
         preds.append(pred)
     
     #Polynomial fit
-    
+    '''
     for ind, pred_id in enumerate(preds):
-        pred_center_points = pred_id['centerVis']  # a (nbre_points x nbre_dim) array
+        pred_center_points =np.concatenate( (pred_id['centerVis'][::3], pred_id['centerVis'][-1].reshape(-1,2)), axis=0)  # a (nbre_points x nbre_dim) array
         if pred_center_points.max() != 0 and len(pred_center_points)>3:
-            #coefs = np.polyfit(pred_center_points[:,0],pred_center_points[:,1],3)
-            #pred_center_points =np.array([list(pred_center_points[:,0]), list(np.polyval(coefs,pred_center_points[:,0]))]).transpose() 
+            coefs = np.polyfit(pred_center_points[:,0],pred_center_points[:,1],3)
+            pred_center_points =np.array([list(pred_center_points[:,0]), list(np.polyval(coefs,pred_center_points[:,0]))]).transpose() 
             
             t = np.arange(len(pred_center_points))
             ti = np.linspace(0, t.max(), 10 * t.size)
@@ -98,8 +98,9 @@ def read_preds(pred_file, meta_info):
             yi = interp1d(t, pred_center_points[:,1], kind='cubic')(ti)
             pred_center_points =np.array([list(xi), list(yi)]).transpose()
             #pred_center_points=interpolate_polyline(pred_center_points, len(pred_center_points))
-        preds[ind]['centerVis'] = pred_center_points
-    
+            preds[ind]['centerVis'][::3] = pred_center_points[:-1]
+            preds[ind]['centerVis'][-1] = pred_center_points[-1]
+    '''
     return preds
 
 
@@ -107,13 +108,6 @@ def read_tracks(track_file, meta_info, track_meta):
     # Read the csv file to a pandas dataframe
     df = pandas.read_csv(track_file)
     df_meta = pandas.read_csv(track_meta)
-
-    #filter some of the parked vehicles in 3rd intersection
-    if meta_info['recordingId'] > 17 and meta_info['recordingId'] < 30: 
-        max_num_frames = df_meta['numFrames'].max()
-        id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
-        del id_parked_objects[-2:]  #keep 2 parked cars
-        df = df[~df['trackId'].isin(id_parked_objects)]
 
     # To extract every track, group the rows by the track id
     raw_tracks = df.groupby(["trackId"], sort=False)
