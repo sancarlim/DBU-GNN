@@ -21,6 +21,7 @@ from models.My_GAT import My_GAT
 from models.Gated_GCN import GatedGCN
 from models.gnn_rnn import Model_GNN_RNN
 from models.rnn_baseline import RNN_baseline
+from models.stgcn import STGCN
 from tqdm import tqdm
 import random
 import wandb
@@ -28,6 +29,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import ModelCheckpoint
+from utils import get_normalized_adj
 
 #from LIT_system import LitGNN
 
@@ -64,7 +66,7 @@ def collate_batch(samples):
     return batched_graph, masks, snorm_n, snorm_e
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, history_frames: int, future_frames: int, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1):
+    def __init__(self, history_frames: int, future_frames: int, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1, alfa: float = 0.25):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -74,6 +76,7 @@ class LitGNN(pl.LightningModule):
         self.history_frames =history_frames
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
+        self.alfa = alfa
         self.overall_loss_time_list=[]
         self.overall_long_err_list=[]
         self.overall_lat_err_list=[]
@@ -137,7 +140,7 @@ class LitGNN(pl.LightningModule):
         pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         overall_sum_time, overall_num, _ = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])  #(B,6)
-        total_loss=torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2))
+        total_loss = self.alfa*torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2)) + (1-self.alfa)*(overall_sum_time[-1]/overall_num.sum(dim=-2)[-1])
 
         # Log metrics
         #self.logger.agg_and_log_metrics({"Train/loss": total_loss.data.item()}, step=self.current_epoch)
@@ -278,8 +281,12 @@ def sweep_train():
         model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'baseline':
         model = RNN_baseline(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn)
+    elif config.model_type == 'grip':
+        model = Model(in_channels=4, num_node=70, edge_importance_weighting=False)
 
-    LitGNN_sys = LitGNN(model=model, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames)
+
+
+    LitGNN_sys = LitGNN(model=model, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa)
 
     # Init ModelCheckpoint callback, monitoring 'val_loss'
     #checkpoint_callback = ModelCheckpoint(monitor='val/Loss', mode='min')
@@ -297,8 +304,8 @@ def sweep_train():
 
 if __name__ == '__main__':
 
-    history_frames=5
-    future_frames=5
+    history_frames=3
+    future_frames=3
 
     if dataset.lower() == 'apollo':
         train_dataset = ApolloScape_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames) #3447
@@ -323,7 +330,7 @@ if __name__ == '__main__':
     #config = wandb.config
 
     sweep_config = {
-    "name": "inD baseline 5s/5s",
+    "name": "GATED 3/3 FDE+ADE - alfa ablation",
     "method": "grid",
     "metric": {
         'name': 'Sweep/val_loss',
@@ -344,28 +351,34 @@ if __name__ == '__main__':
                 #"distribution": 'uniform',
                 #"max": 1e-1,
                 #"min": 1e-5,
-                "values": [1e-3, 1e-4]
+                "values": [1e-3]
             },
             "batch_size": {
                 #"distribution": 'int_uniform',
                 #"max": 512,
                 #"min": 64,
-                "values": [64]
+                "values": [128]
             },
             "hidden_dims": {
                 #"distribution": 'int_uniform',
                 #"max": 512,
                 #"min": 64,
-                "values": [64]
+                "values": [256]
             },
             "model_type": {
-                "values": ['rnn', 'baseline']
+                "values": ['gated','gat']
             },
             "dropout": {
                 #"distribution": 'uniform',
                 #"min": 0.1,
                 #"max": 0.5
                 "values": [0.1]
+            },
+            "alfa": {
+                #"distribution": 'uniform',
+                #"min": 0.1,
+                #"max": 0.5
+                "values": [0.1,0.3,0.8, 1]
             },
             "feat_drop": {
                 "values": [0.]
@@ -388,11 +401,11 @@ if __name__ == '__main__':
                 "values": [0.1]
             },
             "heads": {
-                "values": [1, 3]
+                "values": [1]
             },
             "att_ew": {
                 "distribution": 'categorical',
-                "values": [ False]
+                "values": [ True]
             },               
             "gcn_drop": {
                 "values": [0.]
