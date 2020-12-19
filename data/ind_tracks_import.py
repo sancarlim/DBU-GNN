@@ -47,22 +47,27 @@ def read_from_csv(track_file, static_tracks_file, recordings_meta_file):
     """
     static_info = read_static_info(static_tracks_file)
     meta_info = read_meta_info(recordings_meta_file)
-    tracks = read_tracks(track_file, meta_info)
+    tracks = read_tracks(track_file, static_tracks_file)
     return tracks, static_info, meta_info
 
 
-def read_tracks(track_file, meta_info):
+def read_tracks(track_file, static_info):
     # Read the csv file to a pandas dataframe
     df = pandas.read_csv(track_file)
-    df_meta = pandas.read_csv(meta_info)
+    df_meta = pandas.read_csv(static_info)
     
     #filter some of the parked vehicles , EXCEPT FOR VISUALIZATION
     if test == False:
+
         max_num_frames = df_meta['numFrames'].max()
         id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
-        del id_parked_objects[-2:]  #keep 2 parked cars
+        del id_parked_objects[-10:]  #keep 10 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
     
+        #filter out no-car objects
+        list_no_car_obj = list(df_meta[df_meta['class']!='car'].trackId)
+        df = df[~df['trackId'].isin(list_no_car_obj)]
+        
 
     # To extract every track, group the rows by the track id
     raw_tracks = df.groupby(["frame"], sort=False)
@@ -272,7 +277,7 @@ def generate_train_data(file_track_path, file_static_path):
     all_adjacency_list = []
     all_mean_list = []
     visible_object_indexes_list=[]
-    step = 3 if test else 2
+    step = 5 if test else 2
     for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
@@ -311,7 +316,7 @@ def generate_data(file_tracks_list, file_static_list):
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
     all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/22test_sinsolape_data.pkl'
+    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/22test_sinsolape5_data.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')

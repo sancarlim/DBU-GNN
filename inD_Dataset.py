@@ -25,8 +25,8 @@ total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class,
 class inD_DGLDataset(torch.utils.data.Dataset):
 
     def __init__(self, train_val, history_frames, future_frames, test=False, grip_model=False, data_path=None):
-        self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data.pkl'
-        self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data.pkl'  ####ind_val_test_data.pkl'
+        self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data_cars.pkl'
+        self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data_parked_cars.pkl'  ####ind_val_test_data.pkl'
         if test:
             self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/22test_sinsolape_data.pkl'
         self.train_val=train_val
@@ -55,60 +55,63 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         
         if self.train_val.lower() == 'train':
             total_num = len(self.all_feature_train)
-            
+            '''
             self.last_vis_obj=[]   
             for idx in range(len(self.all_adjacency_train)): 
                 for i in range(len(self.all_adjacency_train[idx])): 
                     if self.all_adjacency_train[idx][i,i] == 0:
                         self.last_vis_obj.append(i)
                         break   
-            
+            '''
             now_history_frame=self.history_frames-1
             feature_id = [0,1,2,3,4] #pos heading vel 
             
             if self.grip_model:
                 feature_id = [0,1,2,-1]
-
+            
             object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
             mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx10
             for i in range(total_num):
                 mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
                 mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
- 
+            
             #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
-            self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
-            self.node_labels=self.all_feature_train[:,:,self.history_frames:,feature_id]*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
+            self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
+            self.node_labels=self.all_feature_train[:,:,self.history_frames:,feature_id]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
             self.output_mask= self.all_feature_train[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
             self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
-            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature_train))]  #5010x70x70
-
+            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2].cpu(), self.node_features[i][:,now_history_frame,:2].cpu()) for i in range(len(self.all_feature_train))]  #5010x70x70
+            self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_train))]
+           
             id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
             self.train_id_list = np.random.permutation(id_list)
 
         else:
             total_num = len(self.all_feature_val)
-            
+            '''
             self.last_vis_obj=[]   
             for idx in range(len(self.all_adjacency_val)): 
                 for i in range(len(self.all_adjacency_val[idx])): 
                     if self.all_adjacency_val[idx][i,i] == 0:
                         self.last_vis_obj.append(i)
                         break   
-            
+            '''
             now_history_frame=self.history_frames-1
             feature_id = [0,1,2,3,4] #pos heading vel 
             info_feats_id = list(range(5,11))  #recording_id,frame,id, l,w, class
             object_type = self.all_feature_val[:,:,:,-2].int()  # torch Tensor NxVxT
+            
             mask_car=torch.zeros((total_num,self.all_feature_val.shape[1],self.total_frames))#.to('cuda') #NxVx12
             for i in range(total_num):
                 mask_car_t=torch.Tensor([1 if (j==1) else 0 for j in object_type[i,:,now_history_frame]])#.to('cuda')
                 mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
- 
-            self.node_features = self.all_feature_val[:,:,:self.history_frames,feature_id]*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
-            self.node_labels=self.all_feature_val[:,:,self.history_frames:,feature_id]*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
+            
+            self.node_features = self.all_feature_val[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
+            self.node_labels=self.all_feature_val[:,:,self.history_frames:,feature_id]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
             self.output_mask= self.all_feature_val[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
             self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
-            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:].cpu(), self.node_features[i][:,now_history_frame,:].cpu()) for i in range(len(self.all_feature_val))]  #5010x70x70
+            self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2].cpu(), self.node_features[i][:,now_history_frame,:2].cpu()) for i in range(len(self.all_feature_val))]  #5010x70x70
+            #self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_val))]
             self.track_info = self.all_feature_val[:,:,:,info_feats_id]
 
             if self.test:
@@ -178,9 +181,13 @@ class inD_DGLDataset(torch.utils.data.Dataset):
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
+        #rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
+        #rel_vels = [1/(i) if i!=0 else 1 for i in rel_vels]
+        
+        distances = [1/(i) if i!=0 else 1 for i in distances]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
-        norm_distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)#.to('cuda')
+
+        graph.edata['w']=torch.tensor(distances, dtype=torch.float32)#.to('cuda')  
         graph.ndata['x']=self.node_features[idx,self.all_visible_object_idx[idx]] 
         graph.ndata['gt']=self.node_labels[idx,self.all_visible_object_idx[idx]]
         output_mask = self.output_mask[idx,self.all_visible_object_idx[idx]]
@@ -206,7 +213,8 @@ class inD_DGLDataset(torch.utils.data.Dataset):
 if __name__ == "__main__":
     history_frames=5
     future_frames=5
-    test_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, test=False, grip_model=False)  #1754
+    test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, test=False, grip_model=True)  #1754
+    print(len(test_dataset))
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False) 
     next(iter(test_dataloader))
     
