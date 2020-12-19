@@ -243,13 +243,13 @@ class TrackVisualizer(object):
                 self.ax.add_patch(polygon)
                 plotted_objects.append(polygon)
 
-            if self.config["plotTrackingLines"] and is_car:
+            if self.config["plotTrackingLines"]:
                 plotted_centroid = plt.Circle((center_points[current_index][0],
                                                center_points[current_index][1]),
                                               facecolor=color, **self.centroid_style)
                 self.ax.add_patch(plotted_centroid)
                 plotted_objects.append(plotted_centroid)
-                if center_points.shape[0] > 0:
+                if center_points.shape[0] > 0 and is_car:
                     # Calculate the centroid of the vehicles by using the bounding box information
                     # Check track direction
                     plotted_centroids = self.ax.plot(
@@ -269,25 +269,35 @@ class TrackVisualizer(object):
                         #Plot predictions
                         if pred_exists:
                             #Polynomial fit
-                            draw_pred=np.concatenate( (pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][::3], pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][-1].reshape(-1,2)), axis=0)
-                            if draw_pred.max() != 0  and len(draw_pred)>3:
-                                #coefs = np.polyfit(draw_pred[:,0],draw_pred[:,1],3)
-                                #draw_pred =np.array([list(draw_pred[:,0]), list(np.polyval(coefs,draw_pred[:,0]))]).transpose() 
-                                t = np.arange(len(draw_pred))
-                                ti = np.linspace(0, t.max(), 10 * t.size)
-                                xi = interp1d(t, draw_pred[:,0], kind='cubic')(ti)   #spline, quadratic, cubic interpolation of 1st, 2nd, 3rd order 
-                                yi = interp1d(t, draw_pred[:,1], kind='cubic')(ti)
-                                draw_pred =np.array([list(xi), list(yi)]).transpose()
+                            #draw_pred=np.concatenate( (pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][::5], 
+                            #                           pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][-1].reshape(-1,2)), axis=0 )
+                            index = int(np.where(pred['frame_id']==self.current_frame)[0][0])
+                            #draw_pred= pred_center_points[index:index+5]
+                            
+                            draw_pred=np.concatenate( (pred_center_points[index:index+3], 
+                                                       pred_center_points[index:index+3][-1].reshape(-1,2)), axis=0 )
                             print(self.current_frame, draw_pred.shape,track_ind)
-                            plotted_centroids_pred = self.ax.plot(
-                                #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 0],
-                                #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 1], 
-                                #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 0],
-                                #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 1], 
-                                draw_pred[:,0],
-                                draw_pred[:,1],
-                                **self.track_style_pred)
-                            plotted_objects.append(plotted_centroids_pred)
+                            
+                            if draw_pred.min() != 0: 
+                                
+                                if len(draw_pred)>3:  #Min 4 points for spline interpolation
+                                    t = np.arange(len(draw_pred))
+                                    ti = np.linspace(0, t.max(), 10 * t.size)
+                                    xi = interp1d(t, draw_pred[:,0], kind='cubic')(ti)   #spline, quadratic, cubic interpolation of 1st, 2nd, 3rd order 
+                                    yi = interp1d(t, draw_pred[:,1], kind='cubic')(ti)
+                                    draw_pred =np.array([list(xi), list(yi)]).transpose()
+                                    #coefs = np.polyfit(draw_pred[:,0],draw_pred[:,1],3)
+                                    #draw_pred =np.array([list(draw_pred[:,0]), list(np.polyval(coefs,draw_pred[:,0]))]).transpose() 
+                                
+                                plotted_centroids_pred = self.ax.plot(
+                                    #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 0],
+                                    #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 1], 
+                                    #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 0],
+                                    #np.concatenate((pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0])::3], pred_center_points[-1].reshape(-1,2)),axis=0)[:, 1], 
+                                    draw_pred[:,0],
+                                    draw_pred[:,1],
+                                    **self.track_style_pred)
+                                plotted_objects.append(plotted_centroids_pred)
 
 
             if self.config["showTextAnnotation"] and is_car:
