@@ -7,6 +7,7 @@ import os
 os.environ['DGLBACKEND'] = 'pytorch'
 from dgl import DGLGraph
 import numpy as np
+import matplotlib.pyplot as plt
 import dgl.function as fn
 
 
@@ -23,10 +24,17 @@ class GatedGCN_layer(nn.Module):
         self.bn_node_e = nn.BatchNorm1d(output_dim)
 
     def message_func(self, edges):
-        Bh_j = edges.src['Bh']
+        Bh_j = edges.src['Bh'] #n_e,256
         # e_ij = Ce_ij + Dhi + Ehj   N*B,256
-        e_ij = edges.data['Ce'] + edges.src['Dh'] + edges.dst['Eh']
+        e_ij = edges.data['Ce'] + edges.src['Dh'] + edges.dst['Eh'] #n_e,256
         edges.data['e'] = e_ij
+        #VISUALIZE E
+        '''
+        e_ijvis=e_ij.detach().cpu().numpy().astype('uint8')
+        e_ijvis=(e_ijvis*255/np.max(e_ijvis))
+        plt.imshow(e_ijvis, cmap='hot')
+        plt.show()
+        '''
         return {'Bh_j' : Bh_j, 'e_ij' : e_ij}
 
     def reduce_func(self, nodes):
@@ -38,6 +46,23 @@ class GatedGCN_layer(nn.Module):
         sigma_ij = torch.sigmoid(e)
         # hi = Ahi + sum_j eta_ij * Bhj   
         h = Ah_i + torch.sum(sigma_ij * Bh_j, dim=1) / torch.sum(sigma_ij, dim=1)  #shape n_nodes*256
+        
+        #VISUALIZE M AND H SIN RESIDUAL CONNECTION, PUERTA ETA
+        '''
+        h0=h.detach().cpu().numpy().astype('uint8')
+        h0=(h0*255/np.max(h0))
+        M = torch.sum(sigma_ij * Bh_j, dim=1) / torch.sum(sigma_ij, dim=1)
+        M=M.detach().cpu().numpy().astype('uint8')
+        M=(M*255/np.max(M))
+        fig,ax=plt.subplots(1,2)
+        im1=ax[0].imshow(h0,cmap='hot',aspect='auto')
+        ax[0].set_title('h',fontsize=8)
+        im2=ax[1].imshow(M,cmap='hot',aspect='auto')
+        ax[1].set_title('Aggregated Message',fontsize=8)
+        fig.colorbar(im1,ax=ax[0])
+        fig.colorbar(im2,ax=ax[1])
+        plt.show()
+        '''
         return {'h' : h}
     
     def forward(self, g, h, e, snorm_n, snorm_e):
@@ -46,7 +71,7 @@ class GatedGCN_layer(nn.Module):
         e_in = e # residual connection
         
         
-        g.ndata['h']  = h 
+        g.ndata['h']  = h
         g.ndata['Ah'] = self.A(h) 
         g.ndata['Bh'] = self.B(h) 
         g.ndata['Dh'] = self.D(h)
@@ -71,7 +96,22 @@ class GatedGCN_layer(nn.Module):
         
         h = h_in + h # residual connection
         e = e_in + e # residual connection
-        
+
+        #VISUALIZE E AND H
+        '''
+        hvis=h.detach().cpu().numpy().astype('uint8')
+        hvis=(hvis*255/np.max(hvis))
+        evis=e.detach().cpu().numpy().astype('uint8')
+        evis=(evis*255/np.max(evis))
+        fig,ax=plt.subplots(1,2)
+        im1=ax[0].imshow(hvis,cmap='hot')
+        ax[0].set_title('H_l+1',fontsize=8)
+        im2=ax[1].imshow(evis,cmap='hot')
+        ax[1].set_title('Edges_l+1',fontsize=8)
+        fig.colorbar(im1,ax=ax[0])
+        fig.colorbar(im2,ax=ax[1])
+        plt.show()
+        '''
         return h, e
 
 

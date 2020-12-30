@@ -35,7 +35,7 @@ class TrackVisualizer(object):
             indices = [i_track for i_track, track in enumerate(self.tracks)
                        if
                        self.static_info[track["trackId"]]["initialFrame"] <= i_frame <= self.static_info[track["trackId"]][
-                           "finalFrame"]]
+                           "finalFrame"] and self.static_info[track['trackId']]['class'] in ('car','pedestrian')]
             self.ids_for_frame[i_frame] = indices
 
         # Initialize variables
@@ -209,6 +209,7 @@ class TrackVisualizer(object):
             object_class = static_track_information["class"]
             is_vehicle = object_class in ["car", "truck_bus", "motorcycle"]
             is_car = object_class in ['car', 'truck_bus']
+            is_bicycle = object_class in ['bicycle']
             bounding_box = track["bboxVis"][current_index] / self.scale_down_factor
             center_points = track["centerVis"] / self.scale_down_factor
             pred_center_points = pred["centerVis"] / self.scale_down_factor 
@@ -249,7 +250,7 @@ class TrackVisualizer(object):
                                               facecolor=color, **self.centroid_style)
                 self.ax.add_patch(plotted_centroid)
                 plotted_objects.append(plotted_centroid)
-                if center_points.shape[0] > 0 and is_car:
+                if center_points.shape[0] > 0:
                     # Calculate the centroid of the vehicles by using the bounding box information
                     # Check track direction
                     plotted_centroids = self.ax.plot(
@@ -298,9 +299,11 @@ class TrackVisualizer(object):
                                     draw_pred[:,1],
                                     **self.track_style_pred)
                                 plotted_objects.append(plotted_centroids_pred)
+                        else:
+                            print('{} not visualized'.format(track_ind))
 
 
-            if self.config["showTextAnnotation"] and is_car:
+            if self.config["showTextAnnotation"] and not is_bicycle:
                 # Plot the text annotation
                 annotation_text = "ID{}".format(track_id)
                 if self.config["showClassLabel"]:

@@ -7,6 +7,7 @@ os.environ['DGLBACKEND'] = 'pytorch'
 from dgl import DGLGraph
 import numpy as np
 import dgl.function as fn
+import matplotlib.pyplot as plt
 
 class My_GATLayer(nn.Module):
     def __init__(self, in_feats, out_feats, bn=True, feat_drop=0., attn_drop=0., att_ew=False):
@@ -54,23 +55,44 @@ class My_GATLayer(nn.Module):
         #ATTN DROPOUT
         a = self.attn_drop_l(   F.softmax(nodes.mailbox['e'], dim=1)  )  #attention score between nodes i and j
         
+        #h = torch.sum(a * nodes.mailbox['z'], dim=1) 
         h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1)
         return {'h': h}
                                
     def forward(self, g, h,snorm_n):
         with g.local_scope():
-            
+
+            #feat = h.detach().cpu().numpy().astype('uint8')
+            #feat=(feat*255/np.max(feat))
+
             #feat dropout
             h=self.feat_drop_l(h)
             
             h_in = h
             g.ndata['h']  = h 
             g.ndata['h_s'] = self.linear_self(h) 
-            g.ndata['z'] = self.linear_func(h) #(18) -> (18) 
+            g.ndata['z'] = self.linear_func(h) 
             g.apply_edges(self.edge_attention)
             g.update_all(self.message_func, self.reduce_func)
-            h = g.ndata['h'] # result of graph convolution
+            #M = g.ndata['h'].detach().cpu().numpy().astype('uint8')-feat
+            #M=(M*255/np.max(M))
+            h =  g.ndata['h'] #+g.ndata['h_s'] 
             #h = h * snorm_n # normalize activation w.r.t. graph node size
+
+            #VISUALIZE
+            '''
+            A = g.adjacency_matrix(scipy_fmt='coo').toarray().astype('uint8')
+            A=(A*255/np.max(A))
+            plt.imshow(A,cmap='hot')
+            plt.show()
+            
+            fig,ax=plt.subplots(1,2)
+            im1=ax[0].imshow(feat,cmap='hot',aspect='auto')
+            ax[0].set_title('X',fontsize=8)
+            im4=ax[1].imshow(M,cmap='hot',aspect='auto')
+            ax[1].set_title('M-X',fontsize=8)
+            plt.show()
+            '''
             if self.bn:
                 h = self.bn_node_h(h) # batch normalization 
             

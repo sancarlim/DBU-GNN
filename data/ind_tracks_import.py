@@ -5,10 +5,8 @@ import os
 from scipy import spatial 
 import pickle
 
-history_frames = 5 # 5 second * 1 frame/second
-future_frames = 5 # 5 second * 1 frame/second
-total_frames = history_frames + future_frames
-neighbor_distance = 10
+
+neighbor_distance = 20
 max_num_object = 70 #per frame
 total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
 
@@ -64,9 +62,11 @@ def read_tracks(track_file, static_info):
         del id_parked_objects[-10:]  #keep 10 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
     
-        #filter out no-car objects
-        list_no_car_obj = list(df_meta[df_meta['class']!='car'].trackId)
-        df = df[~df['trackId'].isin(list_no_car_obj)]
+        #filter out no-car or ped objects
+        list_car_obj = list(df_meta[df_meta['class']=='car'].trackId)
+        list_ped_obj = list(df_meta[df_meta['class']=='pedestrian'].trackId)
+        list_car_obj.extend(list_ped_obj)
+        df = df[df['trackId'].isin(list_car_obj)]   #[~df['trackId'].isin(list_no_car_obj)]
         
 
     # To extract every track, group the rows by the track id
@@ -103,8 +103,9 @@ def read_tracks(track_file, static_info):
                                                     track["lengthVis"], track["widthVis"],
                                                     np.deg2rad(track["headingVis"]))
         '''
-        #Keep only frames to 1Hz
-        if frame%25 == 0:
+        #Keep only frames to 1Hz -> 25 ,  2.5Hz ->10
+        ratio = 20 if herz==1.5 else 25
+        if frame%ratio == 0:
             tracks.append(track)
     return tracks
 
@@ -119,8 +120,8 @@ def read_static_info(static_tracks_file):
     mapping_dict={
         'class':{
             'car':1,
-            'truck_bus':2,
-            'pedestrian':3,
+            'truck_bus':3,
+            'pedestrian':2,
             'bicycle':4,
         }
     }
@@ -277,7 +278,8 @@ def generate_train_data(file_track_path, file_static_path):
     all_adjacency_list = []
     all_mean_list = []
     visible_object_indexes_list=[]
-    step = 5 if test else 2
+    step = history_frames if test else 3  #for 1Hz
+    #step = 3 if herz==1.5 else 2
     for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
@@ -316,7 +318,7 @@ def generate_data(file_tracks_list, file_static_list):
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
     all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/22test_sinsolape5_data.pkl'
+    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_pedcar_3s.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')
@@ -324,11 +326,15 @@ def generate_data(file_tracks_list, file_static_list):
 
 if __name__ == '__main__':
 
-    test = True
+    test = False
+    herz = 1
+    history_frames = 3 if herz==1 else 4 # 5 second * 1 frame/second
+    future_frames = 3 if herz==1 else 4 # 5 second * 1 frame/second
+    total_frames = history_frames + future_frames
     input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'
-    tracks_files = sorted(glob.glob(os.path.join(input_root_path , "22_tracks.csv")))
-    static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "22_tracksMeta.csv")))
-    recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "22_recordingMeta.csv")))
+    tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracks.csv")))
+    static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracksMeta.csv")))
+    recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "*_recordingMeta.csv")))
     generate_data(tracks_files, static_tracks_files)
     
     

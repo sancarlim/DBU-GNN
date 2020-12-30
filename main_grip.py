@@ -49,7 +49,7 @@ def seed_torch(seed=0):
 seed_torch()
 
 
-total_epoch = 50
+total_epoch = 150
 learning_rate = 1e-3
 hidden_dims = 128
 model_type = 'gated' #gcn
@@ -183,11 +183,11 @@ def train(model, model_type, train_dataloader, val_dataloader, opt):
                 #Input pos + heading + vel
                 feats = torch.cat([feats, feats_vel], dim=-1)
             if model_type == 'grip':
-                pred = model(feats, A.to('cuda'),pra_pred_length=3).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
+                pred = model(feats, A.to('cuda'),pra_pred_length=future_frames).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
             else:
                 pred,_ = model(feats[:,:2,:,:], A.to('cuda'))
-                pred= pred.permute(0,3,2,1) #64 5 3 70 -> N, V, T, C
-            overall_sum_time, overall_num, _ = compute_RMSE(pred[:,:,:,:2], labels, masks[:,:,history_frames:total_frames,:].to('cuda'))  #(B,6)
+                pred= pred[:,:2,:,:].permute(0,3,2,1) #64 5 3 70 -> N, V, T, C
+            overall_sum_time, overall_num, _ = compute_RMSE(pred, labels, masks[:,:,history_frames:total_frames,:].to('cuda'))  #(B,6)
             total_loss=torch.sum(overall_sum_time)/torch.sum(overall_num)
             opt.zero_grad() 
             total_loss.backward()
@@ -241,11 +241,11 @@ def val(model,  model_type, val_dataloader,val_loss_sum, epoch):
                 feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
 
             if model_type == 'grip':
-                pred = model(feats, A.to('cuda'),pra_pred_length=3).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
+                pred = model(feats, A.to('cuda'),pra_pred_length=future_frames).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
             else:
                 pred,_ = model(feats[:,:2,:,:], A.to('cuda'))
-                pred= pred.permute(0,3,2,1) #64 5 3 70 -> N, V, T, C
-            _ , overall_num, x2y2_error = compute_RMSE(pred[:,:,:,:2], labels, masks[:,:,history_frames:total_frames,:].to(dev))
+                pred= pred[:,:2,:,:].permute(0,3,2,1) #64 5 3 70 -> N, V, T, C
+            _ , overall_num, x2y2_error = compute_RMSE(pred, labels, masks[:,:,history_frames:total_frames,:].to(dev))
             
             overall_num_list.extend(overall_num.detach().cpu().numpy())
             overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy().sum(axis=1))  #RMSE para cada nodo en cada T
@@ -275,12 +275,12 @@ def test(model, model_type, test_dataloader):
                 feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
 
             if model_type == 'grip':
-                pred = model(feats, A.to('cuda'),pra_pred_length=3).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
+                pred = model(feats, A.to('cuda'),pra_pred_length=future_frames).permute(0,3,2,1)  #N 2 3 70 -> N, V, T, C
             else:
                 pred,_ = model(feats[:,:2,:,:], A.to('cuda'))
-                pred= pred.permute(0,3,2,1) #64 5 3 70 -> N, V, T, C
+                pred= pred[:,:2,:,:].permute(0,3,2,1) #64 2 3 70 -> N, V, T, C
             #pred=pred.view(pred.shape[0],labels.shape[1],-1)
-            _ , overall_num, x2y2_error = compute_RMSE(pred[:,:,:,:2], labels, masks[:,:,history_frames:total_frames,:].to(dev))
+            _ , overall_num, x2y2_error = compute_RMSE(pred, labels, masks[:,:,history_frames:total_frames,:].to(dev))
             overall_num_list.extend(overall_num.detach().cpu().numpy())
             overall_x2y2_list.extend((x2y2_error**0.5).detach().cpu().numpy().sum(axis=1))  #RMSE para cada nodo en cada T
         
@@ -290,11 +290,8 @@ def test(model, model_type, test_dataloader):
 
     print('|{}| Test_RMSE: {}'.format(datetime.now(), ' '.join(['{:.3f}'.format(x) for x in list(overall_loss_time) + [np.sum(overall_loss_time)]])))
     wandb.log({'test/loss_per_sec': overall_loss_time }) 
-    wandb.log({'test/log': np.sum(overall_loss_time) }) 
+    wandb.log({'test/loss': np.sum(overall_loss_time) }) 
     
-
-
-
 
 if __name__ == '__main__':
 
@@ -330,7 +327,7 @@ if __name__ == '__main__':
     if model_type == 'grip':
         model = GRIPModel(in_channels=4, num_node=70, edge_importance_weighting=False).to(dev)
     else:
-        model = social_stgcnn(input_feat=2,output_feat=5, seq_len=3,pred_seq_len=3).to(dev)
+        model = social_stgcnn(input_feat=2,output_feat=2, seq_len=history_frames,pred_seq_len=future_frames).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
 
     print("############### TRAIN ####################")

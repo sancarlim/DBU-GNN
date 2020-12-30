@@ -28,13 +28,10 @@ import statistics
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 dataset = 'ind'
-history_frames = 5
-future_frames= 5
-total_frames = history_frames + future_frames
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gat', wd: float = 1e-1, dataset: str = 'ind'):
+    def __init__(self, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gat', wd: float = 1e-1, dataset: str = 'ind', history_frames: int=3, future_frames: int=5):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -154,29 +151,30 @@ class LitGNN(pl.LightningModule):
 
 
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, track_info, mean_xy = test_batch
-        feats = batched_graph.ndata['x'].float()
-        labels= batched_graph.ndata['gt'][:,:,:2].float()
+        batched_graph, output_masks,snorm_n, snorm_e, track_info, mean_xy, feats, labels = test_batch
         last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo':
-            #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
-            #Input pos + heading + vel
             feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
-            e_w= e_w.view(e_w.shape[0],1)
+            e_w= e_w.unsqueeze(1)
 
-        pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
+        if self.model_type == 'rgcn':
+            rel_type = batched_graph.edata['rel_type'].long()
+            norm = batched_graph.edata['norm']
+            pred = self.model(batched_graph, feats,e_w, rel_type,norm)
+        else:
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
-
+        
         #For visualization purposes
         self.gt_x_list.append((labels[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
         self.gt_y_list.append((labels[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
         self.pred_x_list.append((pred[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  #Lista donde cada elemento array (V*T_pred) (V1,V2,V3...)
         self.pred_y_list.append((pred[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  
-        self.track_info_list.append(track_info[:,history_frames:total_frames,:].reshape(-1,track_info.shape[-1])) # V*T_pred, 6 (recording_id,frame,id, l,w,class)
+        self.track_info_list.append(track_info[:,self.history_frames:self.total_frames,:].reshape(-1,track_info.shape[-1])) # V*T_pred, 6 (recording_id,frame,id, l,w,class)
         
         _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         long_err, lat_err, _ = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
@@ -230,5 +228,8 @@ class LitGNN(pl.LightningModule):
 
         
         df_vis = pd.DataFrame.from_dict(track_vis_dict)   #1935(xVxTpred)x5
-        print(df_vis.head())
-        #df_vis.to_csv('/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/22_preds_sinsolape.csv')
+        raw_preds = df_vis.groupby(['recording_id'])
+        for csv in raw_preds:
+            csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'+str(int(csv[0]))+'_vrus_preds.csv')
+
+        
