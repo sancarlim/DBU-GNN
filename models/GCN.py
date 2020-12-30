@@ -22,6 +22,13 @@ class GCNLayer(nn.Module):
             self.dropout = nn.Dropout(0.)
         self.bn = bn
         self.bn_node_h = nn.BatchNorm1d(out_feats)
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.linear_self.weight, gain=gain)
+        nn.init.xavier_normal_(self.linear.weight, gain=gain)
         
     def reduce_func(self, nodes):
         h = torch.sum(nodes.mailbox['m'], dim=1)
@@ -115,6 +122,13 @@ class GCN(nn.Module):
         self.batch_norm = nn.BatchNorm1d(hid_feats)
         self.bn = bn
         self.embedding = embedding
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.embedding_h.weight)
+        nn.init.xavier_normal_(self.fc.weight, gain=gain)
 
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
 

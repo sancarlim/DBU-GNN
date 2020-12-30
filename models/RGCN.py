@@ -370,13 +370,20 @@ class RGCN(nn.Module):
         self.dropout=nn.Dropout(self.dropout)
         self.batch_norm = nn.BatchNorm1d(self.h_dim)
         self.h2o = self.build_output_layer()
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.i2h.weight, gain=gain)
+        nn.init.xavier_normal_(self.h2o.weight, gain=gain)
 
     def build_input_layer(self):
         return nn.Linear(self.in_dim, self.h_dim)
 
     def build_hidden_layer(self):
         return RelGraphConv(self.h_dim, self.h_dim, self.num_rels, 'basis', self.num_bases,
-                         activation=F.relu, self_loop=True, dropout=self.dropout, low_mem=True, layer_norm=False)
+                         activation=F.relu, self_loop=True, dropout=self.dropout, low_mem=True, layer_norm=self.bn)
 
     def build_output_layer(self):
         #return RGCNLayer(self.h_dim, self.out_dim, self.num_rels, self.num_bases,
@@ -393,11 +400,7 @@ class RGCN(nn.Module):
         #g.ndata['h'] = h
 
         for layer in self.layers:
-            h = layer(g, h.float(),e_w, rel_type, norm)
+            h = layer(g, h.float(),e_w, rel_type, norm)  #Aplica layer_norm -> relu -> dropout
         #h = g.ndata.pop('h')
-
-        h = self.dropout(h)
-        if self.bn:
-            h = self.batch_norm(h)
 
         return self.h2o(h)

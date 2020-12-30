@@ -24,7 +24,7 @@ class My_GATLayer(nn.Module):
         self.attn_drop_l = nn.Dropout(attn_drop)
         self.bn = bn
         
-        self.bn_node_h = nn.BatchNorm1d(out_feats)
+        self.bn_node_h = nn.GroupNorm(32, out_feats) #nn.BatchNorm1d(out_feats)
         
         self.reset_parameters()
     
@@ -94,7 +94,7 @@ class My_GATLayer(nn.Module):
             plt.show()
             '''
             if self.bn:
-                h = self.bn_node_h(h) # batch normalization 
+                h = self.bn_node_h(h) # batch normalization
             
             h = torch.relu(h) # non-linear activation
             h = h_in + h # residual connection
@@ -132,11 +132,13 @@ class My_GAT(nn.Module):
             self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0., False,att_ew)
             self.linear1 = nn.Linear(hidden_dim, output_dim)
             self.batch_norm = nn.BatchNorm1d(hidden_dim)
+            self.group_norm = nn.GroupNorm(32, hidden_dim)
         else:
             self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, num_heads=heads, bn=bn_gat, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew)
             self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
             self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, num_heads=1, bn=False, feat_drop=0., attn_drop=0., att_ew=att_ew)
             self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
+            self.group_norm = nn.GroupNorm(32, hidden_dim*heads)
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
             
         #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
@@ -146,6 +148,19 @@ class My_GAT(nn.Module):
         else:
             self.dropout_l = nn.Dropout(0.)
         self.bn = bn
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.embedding_h.weight)
+        nn.init.xavier_normal_(self.linear1.weight, gain=gain)
+        nn.init.xavier_normal_(self.embedding_e.weight)
+        
+        if self.heads == 3:
+            nn.init.xavier_normal_(self.embedding_e2.weight, gain=gain)
+    
         
     def forward(self, g, feats,e_w,snorm_n,snorm_e):
         
@@ -163,12 +178,9 @@ class My_GAT(nn.Module):
         if self.heads > 1:
             e = self.embedding_e2(e_w)
             g.edata['w']=e
-        h = self.gat_2(g, h,snorm_n)  #RELU DENTRO DE LA GAT_LAYER
+        h = self.gat_2(g, h,snorm_n)  #BN Y RELU DENTRO DE LA GAT_LAYER
         
         h = self.dropout_l(h)
-        if self.bn:
-            h = self.batch_norm(h)
-
         #Last linear layer
         y = self.linear1(h) 
         #y = self.linear2(torch.relu(y))

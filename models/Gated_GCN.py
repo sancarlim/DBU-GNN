@@ -23,6 +23,18 @@ class GatedGCN_layer(nn.Module):
         self.bn_node_h = nn.BatchNorm1d(output_dim)
         self.bn_node_e = nn.BatchNorm1d(output_dim)
 
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.A.weight,gain=gain)
+        nn.init.xavier_normal_(self.B.weight, gain=gain)
+        nn.init.xavier_normal_(self.C.weight,gain=gain)
+        nn.init.xavier_normal_(self.D.weight, gain=gain)
+        nn.init.xavier_normal_(self.E.weight,gain=gain)
+
+
     def message_func(self, edges):
         Bh_j = edges.src['Bh'] #n_e,256
         # e_ij = Ce_ij + Dhi + Ehj   N*B,256
@@ -84,7 +96,6 @@ class GatedGCN_layer(nn.Module):
         h = g.ndata['h'] # result of graph convolution
         e = g.edata['e'] # result of graph convolution
 
-        
         h = h * snorm_n # normalize activation w.r.t. graph node size
         e = e * snorm_e # normalize activation w.r.t. graph edge size
         
@@ -132,7 +143,15 @@ class GatedGCN(nn.Module):
 
         self.batch_norm = nn.BatchNorm1d(hidden_dim)
         self.bn = bn
-        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Reinitialize learnable parameters."""
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.embedding_h.weight)
+        nn.init.xavier_normal_(self.linear1.weight, gain=gain)
+        nn.init.xavier_normal_(self.embedding_e.weight)
+
     def forward(self, g, inputs, e, snorm_n, snorm_e):
 
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
@@ -146,8 +165,6 @@ class GatedGCN(nn.Module):
         h, e = self.GatedGCN2(g, h, e, snorm_n, snorm_e)
         # MLP 
         h = self.linear_dropout(h)
-        if self.bn:
-            h = self.batch_norm(h)
         y = self.linear1(h)
         
         return y
