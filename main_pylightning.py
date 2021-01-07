@@ -37,6 +37,7 @@ dataset = 'ind'  #'apollo'
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str , default='rgcn' ,help='model type')
 parser.add_argument('--name', type=str , default='Sweep' ,help='sweep name')
+parser.add_argument('--count', type=int , default=8 ,help='sweep number of runs')
 parser.add_argument('--history_frames', type=int , default=3 ,help='Temporal size of the history sequence.')
 parser.add_argument('--future_frames', type=int , default=3 ,help='Temporal size of the predicted sequence.')
 args = parser.parse_args()
@@ -54,7 +55,6 @@ default_config = {
             "feat_drop": 0.,
             "attn_drop":0.,
             "bn":False,
-            "bn_gat": False,
             "wd": 0.1,
             "heads": 1,
             "att_ew": True,               
@@ -118,7 +118,8 @@ class LitGNN(pl.LightningModule):
         return pred
     
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
+        #opt = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
         if self.probabilistic:
             opt=torch.optim.SGD(self.parameters(),lr=0.01)
         return opt
@@ -394,13 +395,13 @@ def sweep_train():
 
     if config.model_type == 'gat':
         hidden_dims = round(config.hidden_dims / config.heads) 
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=config.heads, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=config.heads, dropout=config.dropout, bn=config.bn, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=config.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn, embedding=config.embedding)
     elif config.model_type == 'gated':
         model = GatedGCN(input_dim=input_dim, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'rnn':
-        model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn, bn_gat=config.bn_gat, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = Model_GNN_RNN(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
     elif config.model_type == 'baseline':
         model = RNN_baseline(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'rgcn':
@@ -414,7 +415,7 @@ def sweep_train():
 
     # Init ModelCheckpoint callback, monitoring 'val_loss'
     #checkpoint_callback = ModelCheckpoint(monitor='val/Loss', mode='min')
-    early_stop_callback = EarlyStopping('Sweep/val_loss')
+    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=4)
     trainer = pl.Trainer(gpus=1, max_epochs=100, logger=wandb_logger, precision=16, callbacks=[early_stop_callback], profiler=True)  #precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20, 
     
     print("############### TRAIN ####################")
@@ -445,26 +446,26 @@ if __name__ == '__main__':
         
     print(args.model)
     if args.model == 'gat':
-        heads = [3]
-        att_ew = [True,False]
+        heads = [1,3]
+        att_ew = [True]
         bs = [128]
-        lr=[1e-4, 3e-4]
-        alfa = [1]
-        bn = [False]
+        lr=[1e-4]
+        alfa = [1,0]
+        bn = [True, False]
         hidden_dims = [256]
     else:
         heads = [1]
         att_ew = [False]
         bs = [128]
-        lr = [1e-4] if args.model == 'rgcn' else [1e-3]
-        hidden_dims = [256,511]
-        alfa = [0,1]
-        bn = [False]
+        lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [3e-4, 1e-3]
+        hidden_dims = [512] if args.model == 'rgcn' else [256]
+        alfa = [0,1] if args.model == 'rgcn' else [1]
+        bn = [True]
 
 
     sweep_config = {
     "name": args.name,
-    "method": "grid",
+    "method": "bayes",
     "metric": {
         'name': 'Sweep/val_loss',
         'goal': 'minimize'   
@@ -490,9 +491,9 @@ if __name__ == '__main__':
                 "values": [future_frames]
             },
             "learning_rate":{
-                #"distribution": 'uniform',
-                #"max": 1e-1,
-                #"min": 1e-5,
+                #"distribution": 'log_uniform',
+                #"max": -2,
+                #"min": -6
                 "values": lr
             },
             "batch_size": {
@@ -504,7 +505,7 @@ if __name__ == '__main__':
             "hidden_dims": {
                 #"distribution": 'int_uniform',
                 #"max": 512,
-                #"min": 64,
+                #"min": 128
                 "values": hidden_dims
             },
             "model_type": {
@@ -512,14 +513,14 @@ if __name__ == '__main__':
             },
             "dropout": {
                 #"distribution": 'uniform',
-                #"min": 0.1,
+                #"min": 0.01,
                 #"max": 0.5
                 "values": [0.1]
             },
             "alfa": {
                 #"distribution": 'uniform',
-                #"min": 0.1,
-                #"max": 0.5
+                #"min": 0,
+                #"max": 1
                 "values": alfa
             },
             "feat_drop": {
@@ -529,18 +530,14 @@ if __name__ == '__main__':
                 "values": [0.]
             },
             "bn": {
-                "distribution": 'categorical',
+                #"distribution": 'categorical',
                 "values": bn
             },
-            "bn_gat": {
-                "distribution": 'categorical',
-                "values": [False]
-            },
             "wd": {
-                #"distribution": 'uniform',
-                #"max": 1,
-                #"min": 0.001,
-                "values": [0.1]
+                #"distribution": 'log_uniform',
+                #"max": -1,
+                #"min": -3
+                "values": [1e-2]
             },
             "heads": {
                 "values": heads
@@ -562,7 +559,7 @@ if __name__ == '__main__':
     
 
     sweep_id = wandb.sweep(sweep_config, project="dbu_graph")
-    wandb.agent(sweep_id, sweep_train)
+    wandb.agent(sweep_id, sweep_train, count=args.count)
     #sweep_train()
 
     #print("############### TRAIN ####################")

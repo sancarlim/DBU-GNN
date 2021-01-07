@@ -126,12 +126,13 @@ class RelGraphConv(nn.Module):
 
         # layer norm
         if self.layer_norm:
-            self.layer_norm_weight = nn.LayerNorm(out_feat, elementwise_affine=True)
+            self.layer_norm_weight = nn.LayerNorm(out_feat, elementwise_affine=True) #nn.GroupNorm(32, out_feat, affine=True) #
 
         # weight for self loop
         if self.self_loop:
-            self.loop_weight = nn.Parameter(th.Tensor(in_feat, out_feat))
-            nn.init.xavier_uniform_(self.loop_weight,
+            #self.loop_weight = nn.Parameter(th.Tensor(in_feat, out_feat))
+            self.loop_weight = nn.Linear(in_feat, out_feat, bias=False)
+            nn.init.xavier_uniform_(self.loop_weight.weight,
                                     gain=nn.init.calculate_gain('relu'))
 
         self.dropout = nn.Dropout(dropout)
@@ -254,8 +255,9 @@ class RelGraphConv(nn.Module):
             if norm is not None:
                 g.edata['norm'] = norm
             if self.self_loop:
-                loop_message = utils.matmul_maybe_select(feat[:g.number_of_dst_nodes()],
-                                                         self.loop_weight)
+                #loop_message = utils.matmul_maybe_select(feat[:g.number_of_dst_nodes()],
+                #                                         self.loop_weight)
+                loop_message = self.loop_weight(feat)
             # message passing
             g.update_all(self.message_func, fn.sum(msg='msg', out='h'))
             # apply bias and activation
@@ -367,8 +369,6 @@ class RGCN(nn.Module):
             h2h = self.build_hidden_layer()
             self.layers.append(h2h)
         # hidden to output
-        self.dropout=nn.Dropout(self.dropout)
-        self.batch_norm = nn.BatchNorm1d(self.h_dim)
         self.h2o = self.build_output_layer()
         self.reset_parameters()
 

@@ -37,6 +37,9 @@ import argparse
 dataset = 'ind'  #'apollo'
 parser = argparse.ArgumentParser()
 parser.add_argument('--goal', type=str , default='test' ,help='metrics / visualize model weights')
+parser.add_argument('--recording', type=int , default=18 )
+parser.add_argument('--frame', type=int , default=425 )
+parser.add_argument('--target', type=int , default=5, help='Output to be predicted' )
 args = parser.parse_args()
 
 def seed_torch(seed=0):
@@ -91,7 +94,7 @@ def model_forward_ig(edge_mask, graph, feats, snorm_n, snorm_e):
         norm = graph.edata['norm']
         out = model(graph, feats,edge_mask, rel_type,norm)
     else:
-        out = model(graph, feats,e_w,snorm_n,snorm_e)
+        out = model(graph, feats,edge_mask,snorm_n,snorm_e)
 
     return out
 
@@ -178,7 +181,7 @@ def visualize(LitGCN_sys,test_dataloader):
     iter_dataloader = iter(test_dataloader)
     graph, masks, snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
 
-    while (track_info[0,0,0]!=22 or track_info[0,2,1]<875):
+    while (track_info[0,0,0]!=args.recording or track_info[0,2,1]<args.frame):
         graph, masks, snorm_n, snorm_e,track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
     print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,2,1]))
 
@@ -194,7 +197,7 @@ def visualize(LitGCN_sys,test_dataloader):
     cond_vals = cond_vals.detach().numpy()
     visualize_importances(range(64),np.mean(cond_vals, axis=0),title="Average Neuron Importances", axis_title="Neurons")
     '''
-    edge_mask = explain(graph, feats, snorm_n, snorm_e, target=5)
+    edge_mask = explain(graph, feats, snorm_n, snorm_e, target=args.target)
     graph.edata['w'] = torch.from_numpy(edge_mask)
     draw_graph(graph, feats.float()[:,2,:2],track_info, edge_mask, draw_edge_labels=False)
 
@@ -433,7 +436,7 @@ if __name__ == "__main__":
 
     hidden_dims = 256
     heads = 3
-    model_type = 'rgcn'
+    model_type = 'gat'
     history_frames = 3
     future_frames= 3
 
@@ -449,7 +452,7 @@ if __name__ == "__main__":
 
     if model_type == 'gat':
         hidden_dims = round(hidden_dims/heads)
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=False, bn_gat=False, feat_drop=0, attn_drop=0, att_ew=True)
+        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, bn_gat=False, feat_drop=0, attn_drop=0, att_ew=True)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
@@ -459,7 +462,7 @@ if __name__ == "__main__":
     
 
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/dbu_graph/5r3efwxp/checkpoints/'+'epoch=16.ckpt',model=LitGCN_sys.model)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/dbu_graph/pcsb0h53/checkpoints/'+'epoch=74.ckpt',model=LitGCN_sys.model)
     LitGCN_sys.model_type = model_type
 
     if args.goal  == 'test':
