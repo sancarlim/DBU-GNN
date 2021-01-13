@@ -6,6 +6,7 @@ from scipy import spatial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import os
 os.environ['DGLBACKEND'] = 'pytorch'
 from torchvision import datasets, transforms
@@ -13,21 +14,48 @@ import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
 
+def collate_batch(samples):
+    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    masks = np.vstack(masks)
+    feats = torch.vstack(feats)
+    gt = torch.vstack(gt).float()
+
+    #masks = masks.view(masks.shape[0],-1)
+    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
+    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
+    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
+    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
+    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
+    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
+    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
+    batched_graph = dgl.batch(graphs)  # batch graphs
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt
 
 class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     _raw_dir = '/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_train_data.pkl'
 
-    def __init__(self, train_val, data_path=None):
+    def __init__(self, train_val, test=False, data_path=None):
         self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_train_data.pkl'
         self.train_val=train_val
-        self.process()        
+        self.test = test
+        if test:
+            self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_test_data.pkl'
+        self.process() 
+
 
     def load_data(self):
-        with open(self.raw_dir, 'rb') as reader:
-            # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
-        all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
-        self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
+        if self.test:
+            with open(self.raw_dir, 'rb') as reader:
+                # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
+                [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
+            all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
+            self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
+        else:
+            with open(self.raw_dir, 'rb') as reader:
+                # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
+                [all_feature, self.all_adjacency, self.all_mean_xy,_]= pickle.load(reader)
+            all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
+            self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
 
 
     def process(self):
@@ -44,21 +72,25 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 9]  #x,y,heading, QUITO [visible_mask]
+        feature_id = [3, 4, 9, 2]   #frame,obj,type,x,y,z,l,w,h,heading, QUITO [visible_mask]
+            
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
+        self.info = self.all_feature[:,:,:,:3] #frame,obj,type for TEST
+
         mask_car=np.zeros((total_num,self.all_feature.shape[1],12))#.to('cuda') #NxVx12
         for i in range(total_num):
-            mask_car_t=np.array([1  if (j==2 or j==1) else 0 for j in object_type[i,:,5]])#.to('cuda')
+            mask_car_t=np.array([1  if (j==2 or j==1 or j==3 or j==4) else 0 for j in object_type[i,:,5]])#.to('cuda')
             mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12)#.to('cuda') #120x12
+        
 
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
 
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
-        self.node_features = self.all_feature[:,:,:now_history_frame,feature_id]  #obj type,x,y 6 primeros frames
-        self.node_labels=self.all_feature[:,:,now_history_frame:,feature_id] #x,y 6 ultimos frames
+        self.node_features = self.all_feature[:,:,:now_history_frame,feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
+        self.node_labels=self.all_feature[:,:,now_history_frame:,[3,4]] #x,y 6 ultimos frames
         #self.node_features[:,:,:,-1] *= mask_car[:,:,:6]   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
         
         '''
@@ -69,24 +101,33 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         scaler.transform(scale_xy)
         self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
         '''
-        self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
-        self.output_mask = np.array(self.output_mask.unsqueeze_(-1) )
-
+        
         #EDGES weights  #5010x120x120[]
         self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,5,:], self.node_features[i][:,5,:]) for i in range(len(self.all_feature))]  #5010x70x70
 
-        # TRAIN VAL SETS
-        # Remove empty rows from output mask 
-        zero_indeces_list = [i for i in range(len(self.output_mask[:,:,6:] )) if np.all(np.array(self.output_mask[:,:,6:] .squeeze(-1))==0, axis=(1,2))[i] == True ]
-
-        id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
-        total_valid_num = len(id_list)
-        #ind=np.random.permutation(id_list)
-        ind = id_list
-        self.train_id_list, self.val_id_list, self.test_id_list = ind[:round(total_valid_num*0.75)], ind[round(total_valid_num*0.75):round(total_valid_num*0.95)],ind[round(total_valid_num*0.95):]
+        
+        if self.test:
+            self.output_mask= self.all_feature[:,:,:,-1]*mask_car[:,:,:6] #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+            
+            # TRAIN VAL SETS
+            # Remove empty rows from output mask 
+            #zero_indeces_list = [i for i in range(len(self.output_mask )) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
+            id_list = list(set(list(range(total_num)))) #- set(zero_indeces_list))
+            self.test_id_list = id_list
+        else:
+            self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+            self.output_mask = self.output_mask.unsqueeze_(-1)
+            # TRAIN VAL SETS
+            # Remove empty rows from output mask 
+            zero_indeces_list = [i for i in range(len(self.output_mask[:,:,6:] )) if np.all(np.array(self.output_mask[:,:,6:] .squeeze(-1))==0, axis=(1,2))[i] == True ]
+            id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
+            total_valid_num = len(id_list)
+            ind=np.random.permutation(id_list)
+            self.train_id_list, self.val_id_list, self.test_id_list = ind[:round(total_valid_num*0.75)], ind[round(total_valid_num*0.75):round(total_valid_num*0.95)],ind[round(total_valid_num*0.95):]
 
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
+        
 
 
     def __len__(self):
@@ -137,11 +178,26 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
+        distances = [1/(i) if i!=0 else 1 for i in distances]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
-        norm_distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w']=torch.tensor(norm_distances, dtype=torch.float32)#.to('cuda')
-        graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
-        graph.ndata['gt']=self.node_labels[idx,:self.last_vis_obj[idx]]
+        graph.edata['w']=torch.tensor(distances, dtype=torch.float32)#.to('cuda')
+        #graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
+        feats = self.node_features[idx,:self.last_vis_obj[idx]] 
+        gt=self.node_labels[idx,:self.last_vis_obj[idx]]  #graph.ndata['gt']
         output_mask = self.output_mask[idx,:self.last_vis_obj[idx]]
+
+        if self.test:
+            return graph, feats, self.info[idx,:self.last_vis_obj[idx]],self.info[idx,:self.last_vis_obj[idx],2], self.all_mean_xy[idx], output_mask
         
-        return graph, output_mask
+        
+        return graph, output_mask, feats, gt 
+
+if __name__ == "__main__":
+    history_frames=6
+    future_frames=6
+    test_dataset = ApolloScape_DGLDataset(train_val='test', test=True)  #230
+    test_dataloader=iter(DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
+    
+    while(1):
+        next(test_dataloader)
+    

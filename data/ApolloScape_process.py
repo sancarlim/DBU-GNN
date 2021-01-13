@@ -85,8 +85,8 @@ def process_data(pra_now_dict, pra_start_ind, pra_end_ind, pra_observed_last):
 
     # np.transpose(object_feature_list, (1,0,2))
     object_frame_feature[:num_visible_object+num_non_visible_object] = np.transpose(object_feature_list, (1,0,2))
-
-    return object_frame_feature, neighbor_matrix, m_xy
+    visible_object_indexes = [list(now_all_object_id).index(i) for i in visible_object_id_list]
+    return object_frame_feature, neighbor_matrix, m_xy, visible_object_indexes
 
 def generate_train_data(pra_file_path):
     '''
@@ -104,22 +104,25 @@ def generate_train_data(pra_file_path):
     all_feature_list = []
     all_adjacency_list = []
     all_mean_list = []
+    visible_object_indexes_list = []
     for start_ind in frame_id_set[:-total_frames+1]:  #recorre el fichero dividiendo los datos en clips de 6+6 frames
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
         observed_last = start_ind + history_frames - 1
-        object_frame_feature, neighbor_matrix, mean_xy = process_data(now_dict, start_ind, end_ind, observed_last)  #N=1
+        object_frame_feature, neighbor_matrix, mean_xy,visible_object_indexes = process_data(now_dict, start_ind, end_ind, observed_last)  #N=1
 
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
         all_mean_list.append(mean_xy)	
+        visible_object_indexes_list.append(visible_object_indexes)
 
     # (N, V, T, C) --> (N, C, T, V)
     all_feature_list = np.transpose(all_feature_list, (0, 3, 2, 1))
     all_adjacency_list = np.array(all_adjacency_list)
     all_mean_list = np.array(all_mean_list)
+    visible_object_indexes_list = np.array(visible_object_indexes_list)
     #print(all_feature_list.shape, all_adjacency_list.shape)   #N= nº de secuencias (12 frames) en cada fichero - nºtotal=5010
-    return all_feature_list, all_adjacency_list, all_mean_list
+    return all_feature_list, all_adjacency_list, all_mean_list, visible_object_indexes_list
 
 
 def generate_test_data(pra_file_path):
@@ -137,7 +140,7 @@ def generate_test_data(pra_file_path):
         end_ind = int(start_ind + history_frames)
         observed_last = start_ind + history_frames - 1
         # print(start_ind, end_ind)
-        object_frame_feature, neighbor_matrix, mean_xy = process_data(now_dict, start_ind, end_ind, observed_last)
+        object_frame_feature, neighbor_matrix, mean_xy, _ = process_data(now_dict, start_ind, end_ind, observed_last)
 
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
@@ -157,7 +160,7 @@ def generate_data(pra_file_path_list, pra_is_train=True):
     all_mean_xy = []
     for file_path in pra_file_path_list:  
         if pra_is_train:     #53 iters (files)
-            now_data, now_adjacency, now_mean_xy = generate_train_data(file_path)
+            now_data, now_adjacency, now_mean_xy,_ = generate_train_data(file_path)
         else:
             now_data, now_adjacency, now_mean_xy = generate_test_data(file_path)   #generate_test_data!!!
         all_data.extend(now_data)
@@ -167,7 +170,6 @@ def generate_data(pra_file_path_list, pra_is_train=True):
     all_data = np.array(all_data) #(N, C, T, V)=(5010, 11, 12, 70) Train
     all_adjacency = np.array(all_adjacency) #(5010, 70, 70) Train
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
-
     # Train (N, C, T, V)=(5010, 11, 12, 70), (5010, 70, 70), (5010, 2)
     # Test (N, C, T, V)=(415, 11, 6, 70), (415, 70, 70), (415, 2)
     print(np.shape(all_data), np.shape(all_adjacency), np.shape(all_mean_xy))
@@ -177,8 +179,8 @@ def generate_data(pra_file_path_list, pra_is_train=True):
         save_path = './apollo_train_data.pkl'
     else:
         save_path = './apollo_test_data.pkl'
-    #with open(save_path, 'wb') as writer:
-    #    pickle.dump([all_data, all_adjacency, all_mean_xy], writer)
+    with open(save_path, 'wb') as writer:
+        pickle.dump([all_data, all_adjacency, all_mean_xy], writer)
 
 
 if __name__ == '__main__':
@@ -186,7 +188,7 @@ if __name__ == '__main__':
     test_file_path_list = sorted(glob.glob(os.path.join(data_root, 'prediction_test/*.txt')))
     
     print('Generating Training Data.')
-    generate_data(train_file_path_list, pra_is_train=True)
+    #generate_data(train_file_path_list, pra_is_train=True)
 
     print('Generating Testing Data.')
     generate_data(test_file_path_list, pra_is_train=False)

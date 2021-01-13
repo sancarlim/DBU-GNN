@@ -16,7 +16,9 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
+from roundD_Dataset import roundD_DGLDataset
 from models.GCN import GCN 
+from models.My_GAT_visualize import My_GAT_vis
 from models.My_GAT import My_GAT
 from models.rnn_baseline import RNN_baseline
 from models.RGCN import RGCN
@@ -34,13 +36,15 @@ from captum.attr import LayerConductance, LayerIntegratedGradients
 from captum.attr import NeuronConductance
 import argparse
 
-dataset = 'ind'  #'apollo'
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--goal', type=str , default='test' ,help='metrics / visualize model weights')
-parser.add_argument('--recording', type=int , default=18 )
-parser.add_argument('--frame', type=int , default=425 )
+parser.add_argument('--recording', type=int , default=0 )
+parser.add_argument('--frame', type=int , default=4175 )
+parser.add_argument('--dataset', type=str , default='ind' )
 parser.add_argument('--target', type=int , default=5, help='Output to be predicted' )
 args = parser.parse_args()
+dataset = args.dataset  
 
 def seed_torch(seed=0):
     random.seed(seed)
@@ -94,7 +98,7 @@ def model_forward_ig(edge_mask, graph, feats, snorm_n, snorm_e):
         norm = graph.edata['norm']
         out = model(graph, feats,edge_mask, rel_type,norm)
     else:
-        out = model(graph, feats,edge_mask,snorm_n,snorm_e)
+        out,_,_ = model(graph, feats,edge_mask,snorm_n,snorm_e)
 
     return out
 
@@ -124,9 +128,10 @@ def draw_graph(g, xy, track_info, edge_mask=None, draw_edge_labels=False):
         edge_color = 'black'
         widths = None
     else:
+        edge_mask = edge_mask.flatten().tolist()
         edge_color = [edge_mask[i] for i,(u, v) in enumerate(g.edges())]
         widths = [x * 10 for x in edge_color]
-    nx.draw(g, pos=pos, labels=node_labels, width=widths,
+    nx.draw(g, pos=pos, labels=node_labels, width=widths*1000,
             edge_color=edge_color, edge_cmap=plt.cm.Blues,
             node_color='azure')
     
@@ -201,7 +206,21 @@ def visualize(LitGCN_sys,test_dataloader):
     graph.edata['w'] = torch.from_numpy(edge_mask)
     draw_graph(graph, feats.float()[:,2,:2],track_info, edge_mask, draw_edge_labels=False)
 
-    
+def visualize_att(LitGCN_sys,test_dataloader):
+    iter_dataloader = iter(test_dataloader)
+    graph, masks, snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
+
+    while (track_info[0,0,0]!=args.recording or track_info[0,2,1]<args.frame):
+        graph, masks, snorm_n, snorm_e,track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
+    print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,2,1]))
+
+    LitGCN_sys.model.eval()
+    model= LitGCN_sys.model
+    out, att1, att2 = model_forward(feats, graph, snorm_n, snorm_e)
+    draw_graph(graph, feats.float()[:,2,:2],track_info, att1, draw_edge_labels=False)
+    draw_graph(graph, feats.float()[:,2,:2],track_info, att2, draw_edge_labels=False)
+
+
 class LitGNN(pl.LightningModule):
     def __init__(self, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gat', wd: float = 1e-1, dataset: str = 'ind', history_frames: int=3, future_frames: int=5):
         super().__init__()
@@ -213,13 +232,13 @@ class LitGNN(pl.LightningModule):
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
         self.wd = wd
-        self.overall_loss_time_list=[]
-        self.overall_long_err_list=[]
-        self.overall_lat_err_list=[]
+        self.overall_loss_car=[]
+        self.overall_long_err_car=[]
+        self.overall_lat_err_car=[]
         
-        self.overall_loss_time_list_vru=[]
-        self.overall_long_err_list_vru=[]
-        self.overall_lat_err_list_vru=[]
+        self.overall_loss_ped=[]
+        self.overall_long_err_ped=[]
+        self.overall_lat_err_ped=[]
 
         #For visualization purposes
         self.pred_x_list = []
@@ -238,21 +257,35 @@ class LitGNN(pl.LightningModule):
         opt = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
         return opt
     
-    def compute_RMSE_batch(self,pred, gt, mask): 
+    def compute_RMSE_batch(self,pred, gt, mask, car_ids, ped_ids): 
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
         gt = gt*mask  # outputmask BV,T,C
+        
         x2y2_error=torch.sum(torch.abs(pred-gt)**2,dim=-1) # x^2+y^2 BV,T
-        overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
-        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
-        return overall_sum_time, overall_num, x2y2_error
+        x2y2_error_car = x2y2_error[car_ids]
+        x2y2_error_ped = x2y2_error[ped_ids]
+        x2y2_list = [x2y2_error, x2y2_error_car, x2y2_error_ped]
 
-    def compute_long_lat_error(self,pred,gt,mask):
+        overall_sum_all = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
+        overall_sum_car = x2y2_error_car.sum(dim=-2)
+        overall_sum_ped = x2y2_error_ped.sum(dim=-2)
+        overall_sum_list = [overall_sum_all, overall_sum_car, overall_sum_ped]
+
+        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
+        overall_num_car = mask[car_ids].sum(dim=-1).type(torch.int)
+        overall_num_ped = mask[ped_ids].sum(dim=-1).type(torch.int)
+        overall_num_list = [overall_num, overall_num_car, overall_num_ped]
+
+        return overall_sum_list, overall_num_list, x2y2_list
+
+    def compute_long_lat_error(self,pred,gt,mask, car_ids, ped_ids):
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
         gt = gt*mask  # outputmask BV,T,C
         lateral_error = pred[:,:,0]-gt[:,:,0]
         long_error = pred[:,:,1] - gt[:,:,1]  #BV,T
-        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
-        return lateral_error, long_error, overall_num
+        lateral_error = [lateral_error, lateral_error[car_ids], lateral_error[ped_ids]]
+        long_error = [long_error, long_error[car_ids], long_error[ped_ids]]
+        return lateral_error, long_error
 
     def compute_change_pos(self, feats,gt):
         gt_vel = gt.detach().clone()
@@ -328,11 +361,7 @@ class LitGNN(pl.LightningModule):
 
     def test_step(self, test_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = test_batch
-        last_loc = feats[:,-1:,:2]
-        if dataset.lower() == 'apollo':
-            feats_vel,_ = self.compute_change_pos(feats,labels)
-            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
-
+        
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.unsqueeze(1)
@@ -352,62 +381,81 @@ class LitGNN(pl.LightningModule):
         self.pred_y_list.append((pred[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  
         self.track_info_list.append(track_info[:,self.history_frames:self.total_frames,:].reshape(-1,track_info.shape[-1])) # V*T_pred, 6 (recording_id,frame,id, l,w,class)
         
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
-        long_err, lat_err, _ = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
-        overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
-        overall_loss_time[np.isnan(overall_loss_time)]=0
-        overall_long_err = np.sum(long_err.detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
-        overall_lat_err = np.sum(lat_err.detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
+        car_ids = [i for i, value in enumerate(obj_class) if value in [1,3,5,7,8]]
+        ped_ids = [i for i, value in enumerate(obj_class) if value==2]
+
+        _, overall_num_list, x2y2_error_list = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
+        overall_loss_all = np.sum((x2y2_error_list[0]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
+        if len(car_ids) != 0:
+            self.overall_loss_car.append(np.sum((x2y2_error_list[1]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[1].detach().cpu().numpy(), axis=0) )#T
+            if np.isnan(self.overall_loss_car[-1]).any():
+                self.overall_loss_car[-1][np.isnan(self.overall_loss_car[-1])] = 0
+        if len(ped_ids) != 0:
+            self.overall_loss_ped.append(np.sum((x2y2_error_list[2]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[2].detach().cpu().numpy(), axis=0) )#T
+            if np.isnan(self.overall_loss_ped[-1]).any():
+                self.overall_loss_ped[-1][np.isnan(self.overall_loss_ped[-1])] = 0
+
+        overall_loss_all[np.isnan(overall_loss_all)]=0
+
+        long_err_list, lat_err_list = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
+
+        overall_long_err = np.sum(long_err_list[0].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
+        overall_lat_err = np.sum(lat_err_list[0].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
         overall_long_err[np.isnan(overall_long_err)]=0
         overall_lat_err[np.isnan(overall_lat_err)]=0
+        if len(car_ids) != 0:
+            self.overall_long_err_car.append(np.sum(long_err_list[1].detach().cpu().numpy(),axis=0)  / np.sum(overall_num_list[1].detach().cpu().numpy(), axis=0))
+            self.overall_lat_err_car.append(np.sum(lat_err_list[1].detach().cpu().numpy(),axis=0)  / np.sum(overall_num_list[1].detach().cpu().numpy(), axis=0))
+            if np.isnan(self.overall_lat_err_car[-1]).any():
+                self.overall_lat_err_car[-1][np.isnan(self.overall_lat_err_car[-1])] = 0
+                self.overall_long_err_car[-1][np.isnan(self.overall_long_err_car[-1])] = 0       
+        if len(ped_ids) != 0:
+            self.overall_lat_err_ped.append(np.sum(lat_err_list[2].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[2].detach().cpu().numpy(), axis=0))
+            self.overall_long_err_ped.append(np.sum(long_err_list[2].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[2].detach().cpu().numpy(), axis=0))
+            if np.isnan(self.overall_lat_err_ped[-1]).any():
+                self.overall_lat_err_ped[-1][np.isnan(self.overall_lat_err_ped[-1])] = 0
+                self.overall_long_err_ped[-1][np.isnan(self.overall_long_err_ped[-1])] = 0
         #print('per sec loss:{}, Sum{}'.format(overall_loss_time, np.sum(overall_loss_time)))
         #print('per sec long_err:{}, Sum{}'.format(overall_long_err, np.sum(overall_long_err)))
         #print('per sec lat_err:{}, Sum{}'.format(overall_lat_err, np.sum(overall_lat_err)))
-        for i in obj_class:
-            if i == 1:
-                self.overall_loss_time_list.append(overall_loss_time)
-                self.overall_long_err_list.append(overall_long_err)
-                self.overall_lat_err_list.append(overall_lat_err)
-            elif i == 2:
-                self.overall_loss_time_list_vru.append(overall_loss_time)
-                self.overall_long_err_list_vru.append(overall_long_err)
-                self.overall_lat_err_list_vru.append(overall_lat_err)
-        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]) })
+        
+        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_1": torch.tensor(overall_loss_all[:1]), "test/loss_2": torch.tensor(overall_loss_all[1:2]), "test/loss_3": torch.tensor(overall_loss_all[2:]) })
         if self.future_frames == 5:
-            self.log_dict({ "test/loss_4": torch.tensor(overall_loss_time[3:4]), "test/loss_5": torch.tensor(overall_loss_time[4:])})
+            self.log_dict({ "test/loss_4": torch.tensor(overall_loss_all[3:4]), "test/loss_5": torch.tensor(overall_loss_all[4:])})
 
 
     def on_test_epoch_end(self):
-        overall_loss_time = np.array(self.overall_loss_time_list)
-        avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        var = [sum((overall_loss_time[:,i]-avg[i])**2)/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
+        overall_loss_car = np.array(self.overall_loss_car)
+        avg = [sum(overall_loss_car[:,i])/overall_loss_car.shape[0] for i in range(overall_loss_car.shape[1])]
+        var = [sum((overall_loss_car[:,i]-avg[i])**2)/overall_loss_car.shape[0] for i in range(overall_loss_car.shape[1])]
         print('CAR Loss avg: ',avg)
         print('CAR Loss variance: ',var)
-        overall_loss_time = np.array(self.overall_loss_time_list_vru)
-        avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        var = [sum((overall_loss_time[:,i]-avg[i])**2)/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
+        overall_loss_ped = np.array(self.overall_loss_ped)
+        avg = [sum(overall_loss_ped[:,i])/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
+        var = [sum((overall_loss_ped[:,i]-avg[i])**2)/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
         print('VRU Loss avg: ',avg)
         print('VRU Loss variance: ',var)
 
-        overall_long_err = np.array(self.overall_long_err_list)
-        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
-        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+        overall_long_err = np.array(self.overall_long_err_car)
+        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
+        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
         
-        overall_lat_err = np.array(self.overall_lat_err_list)
-        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
+        overall_lat_err = np.array(self.overall_lat_err_car)
+        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
+        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
         print('\n'.join('CAR Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
         print('\n'.join('CAR Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
-        overall_long_err = np.array(self.overall_long_err_list_vru)
-        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
-        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+        overall_long_err = np.array(self.overall_long_err_ped)
+        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
+        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
         
-        overall_lat_err = np.array(self.overall_lat_err_list_vru)
-        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-        print('\n'.join('VRU Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-        print('\n'.join('VRU Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+        overall_lat_err = np.array(self.overall_lat_err_ped)
+        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
+        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
+        print('\n'.join('PED Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+        print('\n'.join('PED Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+
 
         #For visualization purposes
         recording_id_list = [self.track_info_list[i][:,0] for i in range(len(self.track_info_list))]  # lista de 1935[n_seq] arrays(V_seq,T_pred) Recording is the same for all V, but can change in the sequence (5 frames from 2 dif recordings)
@@ -423,27 +471,27 @@ class LitGNN(pl.LightningModule):
             'obj_id': np.concatenate(obj_id_list,axis=0)
         }
 
-        
+        '''
         df_vis = pd.DataFrame.from_dict(track_vis_dict)   #1935(xVxTpred)x5
         raw_preds = df_vis.groupby(['recording_id'])
         for csv in raw_preds:
             csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'+str(int(csv[0]))+'_vrus_preds.csv')
-
-        
+        '''
 
 
 if __name__ == "__main__":
 
-    hidden_dims = 256
+    hidden_dims = 512
     heads = 3
     model_type = 'gat'
     history_frames = 3
     future_frames= 3
 
-    if dataset.lower() == 'apollo':
-        test_dataset = ApolloScape_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames)  #230
-    elif dataset.lower() == 'ind':
-        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True)  #1935
+    if dataset.lower() == 'ind':
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes=(1,3))  #1935
+        print(len(test_dataset))
+    else:
+        test_dataset = roundD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes= (1,2,3,4,5,6,7,8))
         print(len(test_dataset))
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_test)  
 
@@ -452,7 +500,9 @@ if __name__ == "__main__":
 
     if model_type == 'gat':
         hidden_dims = round(hidden_dims/heads)
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, bn_gat=False, feat_drop=0, attn_drop=0, att_ew=True)
+        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
+        if args.goal != 'test':
+            model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
@@ -462,14 +512,19 @@ if __name__ == "__main__":
     
 
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/dbu_graph/pcsb0h53/checkpoints/'+'epoch=74.ckpt',model=LitGCN_sys.model)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/w63u5of1/checkpoints/'+'epoch=90.ckpt',model=LitGCN_sys.model)
     LitGCN_sys.model_type = model_type
+    LitGCN_sys.history_frames = history_frames
+    LitGCN_sys.future_frames = future_frames
+    LitGCN_sys.total_frames = history_frames+future_frames
 
     if args.goal  == 'test':
-        trainer = pl.Trainer(gpus=1, profiler=True)
+        trainer = pl.Trainer(gpus=0, profiler=True)
         trainer.test(LitGCN_sys, test_dataloaders=test_dataloader)
     elif args.goal == 'vis':
         visualize(LitGCN_sys, test_dataloader)
+    elif args.goal == 'att_vis':
+        visualize_att(LitGCN_sys, test_dataloader)
 
 
     

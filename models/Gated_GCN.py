@@ -20,8 +20,8 @@ class GatedGCN_layer(nn.Module):
         self.C = nn.Linear(input_dim, output_dim)
         self.D = nn.Linear(input_dim, output_dim)
         self.E = nn.Linear(input_dim, output_dim)
-        self.bn_node_h = nn.BatchNorm1d(output_dim)
-        self.bn_node_e = nn.BatchNorm1d(output_dim)
+        self.bn_node_h = nn.BatchNorm1d(output_dim)  
+        self.bn_node_e = nn.BatchNorm1d(output_dim) #nn.GroupNorm(32, output_dim) 
 
         self.reset_parameters()
     
@@ -141,7 +141,7 @@ class GatedGCN(nn.Module):
         else:
             self.linear_dropout =  nn.Dropout(0.)
 
-        self.batch_norm = nn.BatchNorm1d(hidden_dim)
+        self.batch_norm = nn.BatchNorm1d(hidden_dim)#nn.GroupNorm(32, hidden_dim) 
         self.bn = bn
         self.reset_parameters()
     

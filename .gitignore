@@ -147,3 +147,8 @@ wandb
 
 #figures
 /Figures
+
+#Apollo_challenge
+/Apollo_Challenge/
+test_Apollo.py
+Graph_InitialTests.ipynb

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
+from roundD_Dataset import roundD_DGLDataset
 from models.GCN import GCN 
 from models.My_GAT import My_GAT
 from models.Gated_GCN import GatedGCN
@@ -32,15 +33,17 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from utils import get_normalized_adj
 import argparse
 
-dataset = 'ind'  #'apollo'
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str , default='rgcn' ,help='model type')
+parser.add_argument('--model', type=str , default='gat' ,help='model type')
 parser.add_argument('--name', type=str , default='Sweep' ,help='sweep name')
 parser.add_argument('--count', type=int , default=8 ,help='sweep number of runs')
-parser.add_argument('--history_frames', type=int , default=3 ,help='Temporal size of the history sequence.')
+parser.add_argument('--history_frames', type=int , default=3,help='Temporal size of the history sequence.')
 parser.add_argument('--future_frames', type=int , default=3 ,help='Temporal size of the predicted sequence.')
+parser.add_argument('--dataset', type=str , default='ind' )
+parser.add_argument('--apollo_vel', type=bool , default=True)
 args = parser.parse_args()
+dataset = args.dataset
 
 default_config = {
             "probabilistic": False,
@@ -214,11 +217,11 @@ class LitGNN(pl.LightningModule):
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
         last_loc = feats[:,-1:,:2]
-        if dataset.lower() == 'apollo':
+        if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel, labels_vel = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
         
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -230,7 +233,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
 
         #Socially consistent
@@ -264,11 +267,11 @@ class LitGNN(pl.LightningModule):
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
         last_loc = feats[:,-1:,:2]
-        if dataset.lower() == 'apollo':
+        if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -279,7 +282,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:], e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         '''
         # Compute predicted trajs.
@@ -310,11 +313,11 @@ class LitGNN(pl.LightningModule):
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
         last_loc = feats[:,-1:,:2]
-        if dataset.lower() == 'apollo':
+        if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -325,7 +328,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         # Compute predicted trajs.
         '''
@@ -345,10 +348,16 @@ class LitGNN(pl.LightningModule):
         self.overall_long_err_list.append(overall_long_err)
         self.overall_lat_err_list.append(overall_lat_err)
         
-        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]) })
-        if self.future_frames > 3:
-            self.log_dict({ "test/loss_4": torch.tensor(overall_loss_time[3:4]), "test/loss_5": torch.tensor(overall_loss_time[-1:])})
-
+        if self.future_frames == 3:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]) })
+        elif self.future_frames == 6:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[1:2]), "test/loss_2": torch.tensor(overall_loss_time[3:4]), "test/loss_3": torch.tensor(overall_loss_time[-1:]) })
+        
+        elif self.future_frames == 5:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[:1]), "test/loss_2": torch.tensor(overall_loss_time[1:2]), "test/loss_3": torch.tensor(overall_loss_time[2:]), "test/loss_4": torch.tensor(overall_loss_time[3:4]), "test/loss_5": torch.tensor(overall_loss_time[-1:]) })
+        elif self.future_frames == 8:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_time), "test/loss_1": torch.tensor(overall_loss_time[1:2]), "test/loss_2": torch.tensor(overall_loss_time[3:4]), "test/loss_3": torch.tensor(overall_loss_time[5:6]), "test/loss_4": torch.tensor(overall_loss_time[-1:]) })
+        
     def on_test_epoch_end(self):
         overall_loss_time = np.array(self.overall_loss_time_list)
         avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
@@ -415,8 +424,8 @@ def sweep_train():
 
     # Init ModelCheckpoint callback, monitoring 'val_loss'
     #checkpoint_callback = ModelCheckpoint(monitor='val/Loss', mode='min')
-    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=4)
-    trainer = pl.Trainer(gpus=1, max_epochs=100, logger=wandb_logger, precision=16, callbacks=[early_stop_callback], profiler=True)  #precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20, 
+    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=6)
+    trainer = pl.Trainer(gpus=1, logger=wandb_logger, precision=16, callbacks=[early_stop_callback], profiler=True)  #precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20, 
     
     print("############### TRAIN ####################")
     trainer.fit(LitGNN_sys, train_dataloader, val_dataloader)
@@ -436,36 +445,48 @@ if __name__ == '__main__':
     future_frames = args.future_frames
 
     if dataset.lower() == 'apollo':
-        train_dataset = ApolloScape_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames) #3447
-        val_dataset = ApolloScape_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames)  #919
-        test_dataset = ApolloScape_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames)  #230
+        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False) #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False)  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False)  #230
+        print(len(train_dataset), len(val_dataset), len(test_dataset))
+        input_dim = 6 if args.apollo_vel else 3
     elif dataset.lower() == 'ind':
-        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model) #12281
-        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model)  #3509
-        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=args.model)  #1754
-        
+        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4)) #12281
+        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4))  #3509
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4))  #1754
+        print(len(train_dataset), len(val_dataset), len(test_dataset))
+        input_dim = 5
+    elif dataset.lower() == 'round':
+        train_dataset = roundD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,3,5,6,7,8)) #12281
+        val_dataset = roundD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,3,5,6,7,8))  #3509
+        test_dataset = roundD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,3,5,6,7,8))  #1754
+        print(len(train_dataset), len(val_dataset), len(test_dataset))
+        input_dim = 5
+
     print(args.model)
     if args.model == 'gat':
         heads = [1,3]
-        att_ew = [True]
+        att_ew = [True,False]
         bs = [128]
-        lr=[1e-4]
-        alfa = [1,0]
+        lr=[1e-3]
+        alfa = [0,1]
         bn = [True, False]
-        hidden_dims = [256]
+        attn_drop = [0.]
+        hidden_dims = [512]
     else:
         heads = [1]
+        attn_drop = [0.]
         att_ew = [False]
         bs = [128]
         lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [3e-4, 1e-3]
-        hidden_dims = [512] if args.model == 'rgcn' else [256]
-        alfa = [0,1] if args.model == 'rgcn' else [1]
+        hidden_dims = [512] if args.model == 'rgcn' else [256,512]
+        alfa = [0,1] if args.model == 'rgcn' else [0,1]
         bn = [True]
 
 
     sweep_config = {
     "name": args.name,
-    "method": "bayes",
+    "method": "random",
     "metric": {
         'name': 'Sweep/val_loss',
         'goal': 'minimize'   
@@ -479,10 +500,13 @@ if __name__ == '__main__':
                 "values": [False]
             },
             "input_dim":{
-                "values": [5]
+                "values": [input_dim]
             },
             "embedding":{
                 "values": [True]
+            },
+            "history_frames":{
+                "values": [history_frames]
             },
             "history_frames":{
                 "values": [history_frames]
@@ -527,7 +551,7 @@ if __name__ == '__main__':
                 "values": [0.]
             },
             "attn_drop": {
-                "values": [0.]
+                "values": attn_drop
             },
             "bn": {
                 #"distribution": 'categorical',
@@ -537,7 +561,7 @@ if __name__ == '__main__':
                 #"distribution": 'log_uniform',
                 #"max": -1,
                 #"min": -3
-                "values": [1e-2]
+                "values": [1e-1,1e-2]
             },
             "heads": {
                 "values": heads
