@@ -16,6 +16,17 @@ import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
 
+def seed_torch(seed=42):
+	random.seed(seed)
+	os.environ['PYTHONHASHSEED'] = str(seed)
+	np.random.seed(seed)
+	torch.manual_seed(seed)
+	torch.cuda.manual_seed(seed)
+	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+	torch.backends.cudnn.benchmark = False
+	torch.backends.cudnn.deterministic = True
+seed_torch()
+
 max_num_object = 30 #per frame
 total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
 def collate_batch(samples):
@@ -33,21 +44,23 @@ def collate_batch(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
+    return batched_graph, masks, snorm_n.to('cuda'), snorm_e.to('cuda'), feats, gt
 
 
 class roundD_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None, classes=(1,2,3,4,5,6,7,8)):
+    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None, recording=0, classes=(1,2,3,4,5,6,7,8)):
         if future_frames == 3:
            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_3s.pkl' 
         elif future_frames == 8:
-            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_3s_2.5Hz.pkl' 
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_2.5Hz8_8f.pkl' 
+        elif future_frames == 12:
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_5s_2.5Hz.pkl' 
         else:
             self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_5s.pkl'
         
         if test:
-            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_3s.pkl'
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_2.5Hz8_12f_test.pkl'#inD_2.5Hz8_8f_test.pkl'#
         self.train_val=train_val
         self.history_frames = history_frames
         self.future_frames = future_frames
@@ -55,13 +68,14 @@ class roundD_DGLDataset(torch.utils.data.Dataset):
         self.model_type = model_type
         self.test = test
         self.classes = classes
+        self.recording=recording
         self.process()        
 
     def load_data(self):
         with open(self.raw_dir_train, 'rb') as reader:
             [all_feature_train, self.all_adjacency, self.all_mean_xy, self.all_visible_object_idx]= pickle.load(reader)
         all_feature_train=np.transpose(all_feature_train, (0,3,2,1)) #(N,V,T,C)
-        self.all_feature_train=torch.from_numpy(all_feature_train[:,:,:,:]).type(torch.float32)#.to('cuda')
+        self.all_feature_train=torch.from_numpy(all_feature_train[:,:,:self.total_frames,:]).type(torch.float32).to('cuda')
 
     def process(self):
         self.load_data()
@@ -75,26 +89,31 @@ class roundD_DGLDataset(torch.utils.data.Dataset):
             feature_id = [0,1,2,-1]
         
         self.object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
-        mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx10
-        for i in range(total_num):
-            mask_car_t=torch.Tensor([1 if j in self.classes else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
-            mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
+        #NO AGENT FILTERED! mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames)).to('cuda') #NxVx10
+        #for i in range(total_num):
+        #    mask_car_t=torch.Tensor([1 if j in self.classes else 0 for j in self.object_type[i,:,now_history_frame]]).to('cuda')
+        #    mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames).to('cuda') #120x12
 
 
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
         self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
         self.node_labels=self.all_feature_train[:,:,self.history_frames:,:2]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
-        self.output_mask= self.all_feature_train[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
+        self.output_mask= self.all_feature_train[:,:,:,-1]#*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
         self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
         self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2].cpu(), self.node_features[i][:,now_history_frame,:2].cpu()) for i in range(len(self.all_feature_train))]  #5010x70x70
         #self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_train))]
-        self.track_info = self.all_feature_train[:,:,:,info_feats_id]
-        self.object_type *= mask_car.int() #Keep only v2v v2vru vru2vru rel-types
+        self.track_info = self.all_feature_train[:,:,:,info_feats_id].detach().cpu().numpy()
+        #self.object_type *= mask_car.int() #Keep only v2v v2vru vru2vru rel-types
 
         id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
         total_valid_num = len(id_list)
-        self.test_id_list, self.val_id_list, self.train_id_list = id_list[:round(total_valid_num*0.1)],id_list[round(total_valid_num*0.1):round(total_valid_num*0.3)],id_list[round(total_valid_num*0.3):]
+        #self.test_id_list, self.val_id_list, self.train_id_list = id_list[:round(total_valid_num*0.1)],id_list[round(total_valid_num*0.1):round(total_valid_num*0.3)],id_list[round(total_valid_num*0.3):]
+        
+        self.val_id_list = list(np.where(self.track_info[:,0,0,0]==1)[0])
+        self.test_id_list = list(np.where(self.track_info[:,0,0,0]==self.recording)[0])
+        #self.train_id_list = list(range(np.where(self.track_info[:,0,0,0]==2)[0][0],total_valid_num))
 
+      
  
     def __len__(self):
         if self.train_val.lower() == 'train':
@@ -115,7 +134,7 @@ class roundD_DGLDataset(torch.utils.data.Dataset):
 
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:len(self.all_visible_object_idx[idx]),:len(self.all_visible_object_idx[idx])])).int()
         graph = dgl.remove_self_loop(graph)
-        graph = dgl.add_self_loop(graph)#.to('cuda')
+        graph = dgl.add_self_loop(graph).to('cuda')
 
         feats = self.node_features[idx,self.all_visible_object_idx[idx]] #graph.ndata['x']
         gt = self.node_labels[idx,self.all_visible_object_idx[idx]]  #graph.ndata['gt']
@@ -126,7 +145,7 @@ class roundD_DGLDataset(torch.utils.data.Dataset):
         #rel_vels = [1/(i) if i!=0 else 1 for i in rel_vels]          
         distances = [1/(i) if i!=0 else 1 for i in distances]
         norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else (i-min(distances))/1.0 for i in distances]
-        graph.edata['w'] = torch.tensor(distances, dtype=torch.float32)#.to('cuda')
+        graph.edata['w'] = torch.tensor(distances, dtype=torch.float32).to('cuda')
 
         if self.model_type == 'rgcn' or self.model_type == 'hetero':
             edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
@@ -189,9 +208,9 @@ class roundD_DGLDataset(torch.utils.data.Dataset):
             return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
-    history_frames=3
-    future_frames=3
-    test_dataset = roundD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, test=False, model_type='gat')
+    history_frames=8
+    future_frames=8
+    test_dataset = roundD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, test=True, model_type='gat')
     test_dataloader=iter(DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
     while(1):
         next(test_dataloader)

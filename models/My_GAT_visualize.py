@@ -22,9 +22,9 @@ class My_GATLayer(nn.Module):
 
         self.feat_drop_l = nn.Dropout(feat_drop)
         self.attn_drop_l = nn.Dropout(attn_drop)
-        self.bn = bn
+        #self.bn = bn
         
-        self.bn_node_h = nn.GroupNorm(32, out_feats) #nn.BatchNorm1d(out_feats)
+        #self.bn_node_h = nn.GroupNorm(32, out_feats) #nn.BatchNorm1d(out_feats)
         
         self.reset_parameters()
     
@@ -100,9 +100,6 @@ class My_GATLayer(nn.Module):
             ax[1].set_title('M-X',fontsize=8)
             plt.show()
             '''
-            if self.bn:
-                h = self.bn_node_h(h) # batch normalization
-            
             h = torch.relu(h) # non-linear activation
             h = h_in + h # residual connection
             
@@ -121,10 +118,14 @@ class MultiHeadGATLayer(nn.Module):
         head_outs = [attn_head(g, h,snorm_n) for attn_head in self.heads]
         if self.merge == 'cat':
             # concat on the output feature dimension (dim=1), for intermediate layers
-            return torch.cat(head_outs, dim=1)
+            outs = [head_outs[i][0] for i in range(0,len(head_outs))]
+            atts = [head_outs[i][1] for i in range(0,len(head_outs))]
+            return torch.cat(outs, dim=1), atts
         else:
+            outs = [head_outs[i][0] for i in range(0,len(head_outs))]
+            atts = [head_outs[i][1] for i in range(0,len(head_outs))]
             # merge using average, for final layer
-            return torch.mean(torch.stack(head_outs))
+            return torch.mean(torch.stack(outs)), atts
 
     
 class My_GAT_vis(nn.Module):
@@ -139,13 +140,13 @@ class My_GAT_vis(nn.Module):
             self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0., False,att_ew)
             self.linear1 = nn.Linear(hidden_dim, output_dim)
             self.batch_norm = nn.BatchNorm1d(hidden_dim)
-            self.group_norm = nn.GroupNorm(32, hidden_dim)
+            #self.group_norm = nn.GroupNorm(32, hidden_dim)
         else:
             self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, num_heads=heads, bn=bn_gat, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew)
             self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
             self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, num_heads=1, bn=False, feat_drop=0., attn_drop=0., att_ew=att_ew)
-            self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
-            self.group_norm = nn.GroupNorm(32, hidden_dim*heads)
+            #self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
+            #self.group_norm = nn.GroupNorm(32, hidden_dim*heads)
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
             
         #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)

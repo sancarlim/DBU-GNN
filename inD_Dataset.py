@@ -16,36 +16,70 @@ import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
 
+def seed_torch(seed=42):
+	random.seed(seed)
+	os.environ['PYTHONHASHSEED'] = str(seed)
+	np.random.seed(seed)
+	torch.manual_seed(seed)
+	torch.cuda.manual_seed(seed)
+	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+	torch.backends.cudnn.benchmark = False
+	torch.backends.cudnn.deterministic = True
+seed_torch()
+
+
 max_num_object = 30 #per frame
 total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
+def collate_batch(samples):
+    graphs, masks, feats, gt,_,_,_ = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    masks = torch.vstack(masks)
+    feats = torch.vstack(feats)
+    gt = np.vstack(gt)
+
+    #masks = masks.view(masks.shape[0],-1)
+    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
+    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
+    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
+    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
+    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
+    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
+    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
+    batched_graph = dgl.batch(graphs)  # batch graphs
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt
+
 
 class inD_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None):
+    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None, classes=(1,2,3,4), recording=30):
         if future_frames == 3:
             #self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data_cars_20m3s.pkl'
             #self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data_parked_cars_20m3s.pkl'  ####ind_val_test_data.pkl'
             #if model_type == 'rgcn' or model_type == 'hetero':
-            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_pedcar_3s.pkl' 
-            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_pedcar_3s.pkl' 
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/train_allobj3s.pkl' 
+            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/val_test_allobj3s.pkl' 
+            #self.raw_dir_test='/home/sandra/PROGRAMAS/DBU_Graph/data/test_transfer_3s.pkl' 
+            if test:
+                self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/val_test_allobj3s.pkl'
         elif future_frames==5:
-            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_data.pkl' #_cars_20m.pkl'
-            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_data_parked_cars_20m.pkl' 
-        elif future_frames==4:
-            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_1.5Hz4f.pkl'
-            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_1.5Hz4f.pkl' 
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/train_allobj5s.pkl'#ind_train_data.pkl' #_cars_20m.pkl'
+            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/val_test_allobj5s.pkl'#ind_val_test_data_parked_cars_20m.pkl' 
+        elif future_frames==12:
+            self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/inD_train_2.5Hz8_12f.pkl'
+            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/inD_val_test_2.5Hz8_12f.pkl' 
         else:
             self.raw_dir_train='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_train_2.5Hz8f.pkl'
             self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_test_2.5Hz8f.pkl' 
-        
         if test:
-            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/ind_test_3s.pkl'
+            self.raw_dir_val='/home/sandra/PROGRAMAS/DBU_Graph/data/inD_2.5Hz8_12f_visual_step3.pkl' #inD_2.5Hz8_8f_test.pkl'        
+        
+        self.recording=recording
         self.train_val=train_val
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
         self.model_type = model_type
         self.test = test
+        self.classes = classes
         self.process()        
 
     def load_data(self):
@@ -55,25 +89,23 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             all_feature_train=np.transpose(all_feature_train, (0,3,2,1)) #(N,V,T,C)
             #Choose frames in each sequence
             self.all_feature_train=torch.from_numpy(all_feature_train[:,:,:,:]).type(torch.float32)#.to('cuda')
-        else:
+        else: #elif self.train_val.lower() == 'val':
             with open(self.raw_dir_val, 'rb') as reader:
                 [all_feature_val, self.all_adjacency_val, self.all_mean_xy_val, self.all_visible_object_idx]= pickle.load(reader)
             all_feature_val=np.transpose(all_feature_val, (0,3,2,1))
             self.all_feature_val=torch.from_numpy(all_feature_val[:,:,:,:]).type(torch.float32)
-
+        '''
+        else:
+            with open(self.raw_dir_test, 'rb') as reader:
+                [all_feature_val, self.all_adjacency_val, self.all_mean_xy_val, self.all_visible_object_idx]= pickle.load(reader)
+            all_feature_val=np.transpose(all_feature_val, (0,3,2,1))
+            self.all_feature_val=torch.from_numpy(all_feature_val[:,:,:,:]).type(torch.float32)
+        '''
     def process(self):
         self.load_data()
         
         if self.train_val.lower() == 'train':
             total_num = len(self.all_feature_train)
-            '''
-            self.last_vis_obj=[]   
-            for idx in range(len(self.all_adjacency_train)): 
-                for i in range(len(self.all_adjacency_train[idx])): 
-                    if self.all_adjacency_train[idx][i,i] == 0:
-                        self.last_vis_obj.append(i)
-                        break   
-            '''
             now_history_frame=self.history_frames-1
             feature_id = [0,1,2,3,4] #pos heading vel 
             
@@ -81,15 +113,17 @@ class inD_DGLDataset(torch.utils.data.Dataset):
                 feature_id = [0,1,2,-1]
             
             self.object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
+            '''
             mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx10
             for i in range(total_num):
-                mask_car_t=torch.Tensor([1 if j in (1,2) else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
+                mask_car_t=torch.Tensor([1 if j in self.classes else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
                 mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
-            
+            '''
             #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
             self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
             self.node_labels=self.all_feature_train[:,:,self.history_frames:,:2]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
-            self.output_mask= self.all_feature_train[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
+            
+            self.output_mask= self.all_feature_train[:,:,:,-1]#*mask_car  #mascara only_cars/peds visibles en 6º frame 
             self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
             self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2].cpu(), self.node_features[i][:,now_history_frame,:2].cpu()) for i in range(len(self.all_feature_train))]  #5010x70x70
             self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_train))]
@@ -99,42 +133,50 @@ class inD_DGLDataset(torch.utils.data.Dataset):
 
         else:
             total_num = len(self.all_feature_val)
-            '''
-            self.last_vis_obj=[]   
-            for idx in range(len(self.all_adjacency_val)): 
-                for i in range(len(self.all_adjacency_val[idx])): 
-                    if self.all_adjacency_val[idx][i,i] == 0:
-                        self.last_vis_obj.append(i)
-                        break   
-            '''
             now_history_frame=self.history_frames-1
             feature_id = [0,1,2,3,4] #pos heading vel 
             info_feats_id = list(range(5,11))  #recording_id,frame,id, l,w, class
             self.object_type = self.all_feature_val[:,:,:,-2].int()  # torch Tensor NxVxT
-            
+            '''
             mask_car=torch.zeros((total_num,self.all_feature_val.shape[1],self.total_frames))#.to('cuda') #NxVx12
             for i in range(total_num):
-                mask_car_t=torch.Tensor([1 if j in (1,2) else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
+                mask_car_t=torch.Tensor([1 if j in self.classes else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
                 mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
-            
+            '''
             self.node_features = self.all_feature_val[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
             self.node_labels=self.all_feature_val[:,:,self.history_frames:,:2]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
-            self.output_mask= self.all_feature_val[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
+            
+            self.output_mask= self.all_feature_val[:,:,:,-1]#*mask_car #mascara obj (car) visibles en 6º frame (5010,120,T_hist)
             self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
             self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2].cpu(), self.node_features[i][:,now_history_frame,:2].cpu()) for i in range(len(self.all_feature_val))]  #5010x70x70
             #self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_val))]
             self.track_info = self.all_feature_val[:,:,:,info_feats_id]
 
+            
+            id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
+            total_valid_num = len(id_list)
+            val_ids, test_ids = id_list[:round(total_valid_num*0.67)],id_list[round(total_valid_num*0.67):]
+            #val_ids=np.random.permutation(val_ids)
+            self.val_id_list, self.test_id_list = val_ids, test_ids
             if self.test:
-                self.object_type *= mask_car.int() #Keep only v2v v2vru vru2vru rel-types
-                self.test_id_list = list(set(list(range(total_num))))
-            else:
-                id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
-                total_valid_num = len(id_list)
-                val_ids, test_ids = id_list[:round(total_valid_num*0.67)],id_list[round(total_valid_num*0.67):]
-                val_ids=np.random.permutation(val_ids)
-                self.val_id_list, self.test_id_list = val_ids, test_ids
+                #self.object_type *= mask_car.int() #Keep only v2v v2vru vru2vru rel-types
+                self.test_id_list = list(range(np.where(self.track_info[:,1,7,0]==self.recording)[0][0], np.where(self.track_info[:,1,7,0]==self.recording+1)[0][0]))#id_list
+                self.test_id_list.extend(list(range(np.where(self.track_info[:,1,7,0]==0)[0][0], np.where(self.track_info[:,1,7,0]==1)[0][0])))
+                #track_info = self.track_info[self.test_id_list]
+                #DEBUGframes = track_info[:,1,:,1]
+                
+                
+            
+
         
+            ''' FOR TRANSFER
+            
+            if self.train_val.lower() == 'val':
+                self.val_id_list = id_list
+            else:
+                self.test_id_list = id_list
+            '''
+            
         # TRAIN VAL SETS
         # Remove empty rows from output mask . En inD esto no va a pasar (muchos más agentes)
         #zero_indeces_list = [i for i in range(len(self.output_mask[:,:,history_frames:])) if np.all(self.output_mask[:,:,history_frames:].squeeze(-1).cpu().numpy()==0, axis=(1,2))[i] == True ]
@@ -164,32 +206,6 @@ class inD_DGLDataset(torch.utils.data.Dataset):
 
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:len(self.all_visible_object_idx[idx]),:len(self.all_visible_object_idx[idx])])).int()
         graph = dgl.remove_self_loop(graph)
-        '''
-        for n in graph.nodes():
-            if graph.in_degrees(n) == 0:
-                graph.add_edges(n,n)
-        '''
-        '''
-        #Data Augmentation
-        if self.train_val.lower() == 'train' and np.random.random()>0.5:
-            angle = 2 * np.pi * np.random.random()
-            sin_angle = np.sin(angle)
-            cos_angle = np.cos(angle)
-
-            angle_mat = np.array(
-                [[cos_angle, -sin_angle],
-                [sin_angle, cos_angle]])
-
-            xy = self.node_features[idx,:self.last_vis_obj[idx],:,:2]   #(V,T,C)
-            #num_xy = np.sum(xy.sum(axis=-1).sum(axis=-1) != 0) # get the number of valid data
-
-            # angle_mat: (2, 2), xy: (2, 12, 120)
-            out_xy = np.einsum('ab,vtb->vta', angle_mat, xy)
-            #now_mean_xy = np.matmul(angle_mat, now_mean_xy)
-            xy= out_xy
-
-            self.node_features[idx,:self.last_vis_obj[idx],:,:2] = torch.from_numpy(xy).type(torch.float32)
-        '''
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         feats = self.node_features[idx,self.all_visible_object_idx[idx]] #graph.ndata['x']
@@ -263,9 +279,13 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
-    history_frames=3
-    future_frames=3
-    test_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, test=False, model_type='hetero')
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False) 
-    next(iter(test_dataloader))
+    history_frames=8
+    future_frames=12
+    #train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4)) #12281
+    #val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #3509
+    test_dataset = inD_DGLDataset(train_val='test', test=True, history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
+    #print(len(train_dataset), len(val_dataset), len(test_dataset))
+    test_dataloader=iter(DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
+    while(1):
+        next(test_dataloader)
     

@@ -35,7 +35,7 @@ class TrackVisualizer(object):
             indices = [i_track for i_track, track in enumerate(self.tracks)
                        if
                        self.static_info[track["trackId"]]["initialFrame"] <= i_frame <= self.static_info[track["trackId"]][
-                           "finalFrame"] and self.static_info[track['trackId']]['class'] in ('car','pedestrian')]
+                           "finalFrame"]] # and self.static_info[track['trackId']]['class'] in ('car','pedestrian')
             self.ids_for_frame[i_frame] = indices
 
         # Initialize variables
@@ -195,10 +195,9 @@ class TrackVisualizer(object):
     def update_figure(self):
         # Plot the bounding boxes, their text annotations and direction arrow
         plotted_objects = []
-        pred_ind = 0
         for track_ind in self.ids_for_frame[self.current_frame]:
             track = self.tracks[track_ind]  
-            pred = self.preds[track_ind]
+            pred = self.preds[track_ind]   #pred[0] -> objid 1
             
             
             track_id = track["trackId"]
@@ -208,7 +207,6 @@ class TrackVisualizer(object):
 
             object_class = static_track_information["class"]
             is_vehicle = object_class in ["car", "truck_bus", "motorcycle"]
-            is_car = object_class in ['car', 'truck_bus']
             is_bicycle = object_class in ['bicycle']
             bounding_box = track["bboxVis"][current_index] / self.scale_down_factor
             center_points = track["centerVis"] / self.scale_down_factor
@@ -272,11 +270,16 @@ class TrackVisualizer(object):
                             #Polynomial fit
                             #draw_pred=np.concatenate( (pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][::5], 
                             #                           pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][-1].reshape(-1,2)), axis=0 )
-                            index = int(np.where(pred['frame_id']==self.current_frame)[0][0])
+                            #index = int(np.where(pred['frame_id']==self.current_frame)[0][-1])
+                            
+                            draw_ids = [int(np.where(pred['frame_id']==frame)[0][-1])  for frame in range(self.current_frame, self.current_frame+120, 10)  if np.where(pred['frame_id']==frame)[0].size != 0]
                             #draw_pred= pred_center_points[index:index+5]
                             
-                            draw_pred=np.concatenate( (pred_center_points[index:index+3], 
-                                                       pred_center_points[index:index+3][-1].reshape(-1,2)), axis=0 )
+                            #FOR  3/3 s
+                            #draw_pred=np.concatenate( (pred_center_points[index:index+3], 
+                            #                           pred_center_points[index:index+3][-1].reshape(-1,2)), axis=0 )
+                            draw_pred= pred_center_points[draw_ids]
+
                             print(self.current_frame, draw_pred.shape,track_ind)
                             
                             if draw_pred.min() != 0: 
@@ -284,7 +287,7 @@ class TrackVisualizer(object):
                                 if len(draw_pred)>3:  #Min 4 points for spline interpolation
                                     t = np.arange(len(draw_pred))
                                     ti = np.linspace(0, t.max(), 10 * t.size)
-                                    xi = interp1d(t, draw_pred[:,0], kind='cubic')(ti)   #spline, quadratic, cubic interpolation of 1st, 2nd, 3rd order 
+                                    xi = interp1d(t, draw_pred[:,0], kind='cubic')(ti)   #slinear, quadratic, cubic interpolation of 1st, 2nd, 3rd order 
                                     yi = interp1d(t, draw_pred[:,1], kind='cubic')(ti)
                                     draw_pred =np.array([list(xi), list(yi)]).transpose()
                                     #coefs = np.polyfit(draw_pred[:,0],draw_pred[:,1],3)
@@ -303,7 +306,7 @@ class TrackVisualizer(object):
                             print('{} not visualized'.format(track_ind))
 
 
-            if self.config["showTextAnnotation"] and not is_bicycle:
+            if self.config["showTextAnnotation"]:
                 # Plot the text annotation
                 annotation_text = "ID{}".format(track_id)
                 if self.config["showClassLabel"]:

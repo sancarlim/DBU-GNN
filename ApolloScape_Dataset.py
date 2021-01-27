@@ -44,18 +44,11 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
 
     def load_data(self):
-        if self.test:
-            with open(self.raw_dir, 'rb') as reader:
-                # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-                [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
-            all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
-            self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
-        else:
-            with open(self.raw_dir, 'rb') as reader:
-                # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-                [all_feature, self.all_adjacency, self.all_mean_xy,_]= pickle.load(reader)
-            all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
-            self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
+        with open(self.raw_dir, 'rb') as reader:
+            # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
+            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
+        all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
+        self.all_feature=torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
 
 
     def process(self):
@@ -77,12 +70,12 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].int()  # torch Tensor NxVxT
         self.info = self.all_feature[:,:,:,:3] #frame,obj,type for TEST
-
+        '''
         mask_car=np.zeros((total_num,self.all_feature.shape[1],12))#.to('cuda') #NxVx12
         for i in range(total_num):
             mask_car_t=np.array([1  if (j==2 or j==1 or j==3 or j==4) else 0 for j in object_type[i,:,5]])#.to('cuda')
             mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12)#.to('cuda') #120x12
-        
+        '''
 
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
@@ -107,15 +100,14 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
         
         if self.test:
-            self.output_mask= self.all_feature[:,:,:,-1]*mask_car[:,:,:6] #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+            self.output_mask= self.all_feature[:,:,:,-1]#*mask_car[:,:,:6] #mascara obj (car) visibles en 6º frame (5010,120,6,1)
             
             # TRAIN VAL SETS
             # Remove empty rows from output mask 
             #zero_indeces_list = [i for i in range(len(self.output_mask )) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
-            id_list = list(set(list(range(total_num)))) #- set(zero_indeces_list))
-            self.test_id_list = id_list
+            self.test_id_list  = list(set(list(range(total_num)))) #- set(zero_indeces_list))
         else:
-            self.output_mask= self.all_feature[:,:,:,-1]*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+            self.output_mask= self.all_feature[:,:,:,-1]#*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
             self.output_mask = self.output_mask.unsqueeze_(-1)
             # TRAIN VAL SETS
             # Remove empty rows from output mask 
@@ -152,29 +144,30 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             if graph.in_degrees(n) == 0:
                 graph.add_edges(n,n)
         '''
-        '''
+        now_mean_xy=self.all_mean_xy[idx].copy()
         #Data Augmentation
+        '''
         if self.train_val.lower() == 'train' and np.random.random()>0.5:
             angle = 2 * np.pi * np.random.random()
             sin_angle = np.sin(angle)
             cos_angle = np.cos(angle)
 
-            angle_mat = np.array(
+            angle_mat = torch.tensor(
                 [[cos_angle, -sin_angle],
-                [sin_angle, cos_angle]])
+                [sin_angle, cos_angle]],dtype=torch.float32)
 
             xy = self.node_features[idx,:self.last_vis_obj[idx],:,:2]   #(V,T,C)
-            #num_xy = np.sum(xy.sum(axis=-1).sum(axis=-1) != 0) # get the number of valid data
+            xy = xy.permute(2,1,0) # C T V
+            num_xy = torch.sum(xy.sum(dim=0).sum(dim=0) != 0).numpy() # get the number of valid data
 
-            # angle_mat: (2, 2), xy: (2, 12, 120)
-            out_xy = np.einsum('ab,vtb->vta', angle_mat, xy)
-            #now_mean_xy = np.matmul(angle_mat, now_mean_xy)
-            xy= out_xy
+            # angle_mat: (2, 2), xy: ( 2, 12, 120)
+            out_xy = torch.einsum('ab,btv->atv', angle_mat, xy)
+            now_mean_xy = torch.matmul(angle_mat, torch.from_numpy(now_mean_xy).type(torch.float32))
+            xy[:,:,:num_xy]= out_xy[:,:,:num_xy]
+            xy = xy.permute(2,1,0) #VTC
 
-            self.node_features[idx,:self.last_vis_obj[idx],:,:2] = torch.from_numpy(xy).type(torch.float32)
+            self.node_features[idx,:self.last_vis_obj[idx],:,:2] = xy
         '''
-
-
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
@@ -195,7 +188,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 if __name__ == "__main__":
     history_frames=6
     future_frames=6
-    test_dataset = ApolloScape_DGLDataset(train_val='test', test=True)  #230
+    test_dataset = ApolloScape_DGLDataset(train_val='train', test=False)  #230
     test_dataloader=iter(DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
     
     while(1):

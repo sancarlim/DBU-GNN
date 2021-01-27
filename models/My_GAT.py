@@ -10,6 +10,37 @@ import numpy as np
 import dgl.function as fn
 from dgl.nn.pytorch.conv.gatconv import edge_softmax, Identity, expand_as_pair
 import matplotlib.pyplot as plt
+import pickle
+from torch.utils.data import DataLoader
+
+def seed_torch(seed=42):
+	os.environ['PYTHONHASHSEED'] = str(seed)
+	np.random.seed(seed)
+	torch.manual_seed(seed)
+	torch.cuda.manual_seed(seed)
+	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+	torch.backends.cudnn.benchmark = False
+	torch.backends.cudnn.deterministic = True
+seed_torch()
+
+def collate_batch(samples):
+    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    masks = torch.vstack(masks)
+    feats = torch.vstack(feats)
+    gt = torch.vstack(gt).float()
+
+    #masks = masks.view(masks.shape[0],-1)
+    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
+    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
+    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
+    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
+    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
+    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
+    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
+    batched_graph = dgl.batch(graphs)  # batch graphs
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt
+
+
 
 class GATConv(nn.Module):
     def __init__(self,
@@ -115,11 +146,14 @@ class GATConv(nn.Module):
                 return rst
 
 class My_GATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats,  feat_drop=0., attn_drop=0., att_ew=False):
+    def __init__(self, in_feats, out_feats,  relu=True, feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
         super(My_GATLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear_func = nn.Linear(in_feats, out_feats, bias=False)
         self.att_ew=att_ew
+        self.res_weight=res_weight
+        self.res_connection=res_connection
+        self.relu = relu
         if att_ew:
             self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
         else:
@@ -159,22 +193,21 @@ class My_GATLayer(nn.Module):
         a = self.attn_drop_l(   F.softmax(nodes.mailbox['e'], dim=1)  )  #attention score between nodes i and j
         
         #h = torch.sum(a * nodes.mailbox['z'], dim=1) 
-        h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1) #OP A
+        if self.res_weight:
+            h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1) #OP A
+        else:
+            h = torch.sum(a * nodes.mailbox['z'], dim=1)
         
         return {'h': h}
                                
     def forward(self, g, h,snorm_n):
         with g.local_scope():
-
-            #feat = h.detach().cpu().numpy().astype('uint8')
-            #feat=(feat*255/np.max(feat))
-
-            #feat dropout
-            h=self.feat_drop_l(h)
             
             h_in = h
             g.ndata['h']  = h 
             g.ndata['h_s'] = self.linear_self(h) 
+            #feat dropout
+            h=self.feat_drop_l(h)
             g.ndata['z'] = self.linear_func(h) 
             g.apply_edges(self.edge_attention)
             g.update_all(self.message_func, self.reduce_func)
@@ -184,33 +217,20 @@ class My_GATLayer(nn.Module):
 
             #h = h * snorm_n # normalize activation w.r.t. graph node size
 
-            #VISUALIZE
-            '''
-            A = g.adjacency_matrix(scipy_fmt='coo').toarray().astype('uint8')
-            A=(A*255/np.max(A))
-            plt.imshow(A,cmap='hot')
-            plt.show()
-            
-            fig,ax=plt.subplots(1,2)
-            im1=ax[0].imshow(feat,cmap='hot',aspect='auto')
-            ax[0].set_title('X',fontsize=8)
-            im4=ax[1].imshow(M,cmap='hot',aspect='auto')
-            ax[1].set_title('M-X',fontsize=8)
-            plt.show()
-            '''
-            
-            h = torch.relu(h) # non-linear activation
-            h = h_in + h # residual connection
+            if self.relu:
+                h = torch.relu(h) # non-linear activation
+            if self.res_connection:
+                h = h_in + h # residual connection
             
             return h #graph.ndata.pop('h')
 
 
 class MultiHeadGATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, num_heads, merge='cat',  feat_drop=0., attn_drop=0., att_ew=False):
+    def __init__(self, in_feats, out_feats, num_heads, relu=True, merge='cat',  feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
         super(MultiHeadGATLayer, self).__init__()
         self.heads = nn.ModuleList()
         for i in range(num_heads):
-            self.heads.append(My_GATLayer(in_feats, out_feats,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew))
+            self.heads.append(My_GATLayer(in_feats, out_feats,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew, res_weight=res_weight, res_connection=res_connection))
         self.merge = merge
 
     def forward(self, g, h, snorm_n):
@@ -225,21 +245,21 @@ class MultiHeadGATLayer(nn.Module):
     
 class My_GAT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
         self.embedding_e = nn.Linear(1, hidden_dim)
         self.heads = heads
         if heads == 1:
-            self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
-            self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew)  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
+            self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
+            self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
             self.linear1 = nn.Linear(hidden_dim, output_dim)
             self.batch_norm = nn.BatchNorm1d(hidden_dim)
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
-            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
+            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            #self.batch_norm = nn.BatchNorm1d(hidden_dim*heads)
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
             
         #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
@@ -274,12 +294,11 @@ class My_GAT(nn.Module):
         g.edata['w']=e
 
         # gat layers
-        h = h = self.gat_1(g, h,snorm_n) #self.gat_1(g, h).flatten(1) #
+        h = self.gat_1(g, h,snorm_n) #self.gat_1(g, h).flatten(1) #
         if self.heads > 1:
             e = self.embedding_e2(e_w)
             g.edata['w']=e
         h = self.gat_2(g, h, snorm_n)  #.flatten(1)  #BN Y RELU DENTRO DE LA GAT_LAYER
-        
         h = self.dropout_l(h)
         #Last linear layer
         y = self.linear1(h) 
@@ -293,16 +312,17 @@ if __name__ == '__main__':
     hidden_dims = 256
     heads = 1
 
-    test_dataset = inD_Dataset.inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=args.model)  #1754
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
+    #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat')  #1754
+    #test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
      
     input_dim = 5*history_frames
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True)
-    
-    iter_dataloader = iter(test_dataloader)
-    graph, masks, snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
-    edge_mask=graph.edata['w'].view(graph.edata['w'].shape[0],1)
-    out = model(graph,feats,  edge_mask,snorm_n,snorm_e)
+    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, res_connection=False, res_weight=False)
+
+    pickle.dumps(model)
+    #iter_dataloader = iter(test_dataloader)
+    #graph, masks, snorm_n, snorm_e, feats, labels = next(iter_dataloader)
+    #edge_mask=graph.edata['w'].view(graph.edata['w'].shape[0],1)
+    #out = model(graph,feats,  edge_mask,snorm_n,snorm_e)

@@ -11,9 +11,9 @@ from track_visualizer import TrackVisualizer
 def create_args():
     config_specification = argparse.ArgumentParser(description="ParameterOptimizer")
     # --- Input paths ---
-    config_specification.add_argument('--input_path', default="/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/",
+    config_specification.add_argument('--input_path', default="/home/sandra/PROGRAMAS/raw_data/inD/data/",
                                       help="Dir with track files", type=str)
-    config_specification.add_argument('--recording_name', default="22",
+    config_specification.add_argument('--recording_name', default="30",
                                       help="Choose recording name.", type=str)
 
     # --- Settings ---
@@ -21,7 +21,7 @@ def create_args():
                                       help="Factor by which the tracks are scaled down to match a scaled down image.",
                                       type=float)
     # --- Visualization settings ---
-    config_specification.add_argument('--skip_n_frames', default=25,
+    config_specification.add_argument('--skip_n_frames', default=10,
                                       help="Skip n frames when using the second skip button.",
                                       type=int)
     config_specification.add_argument('--plotLaneIntersectionPoints', default=False,
@@ -45,7 +45,7 @@ def create_args():
     config_specification.add_argument('--showClassLabel', default=True,
                                       help="Optional: decide whether to show the class in the text annotation.",
                                       type=bool)
-    config_specification.add_argument('--showVelocityLabel', default=True,
+    config_specification.add_argument('--showVelocityLabel', default=False,
                                       help="Optional: decide whether to show the velocity in the text annotation.",
                                       type=bool)
     config_specification.add_argument('--showRotationsLabel', default=False,
@@ -71,7 +71,7 @@ if __name__ == '__main__':
 
     # Search csv files
     tracks_files = glob.glob(input_root_path + recording_name + "*_tracks.csv")
-    preds_files = glob.glob(input_root_path + recording_name + "*_preds_sinsolape.csv")
+    preds_files = glob.glob(input_root_path + recording_name + "*_pred.csv")
     static_tracks_files = glob.glob(input_root_path + recording_name + "*_tracksMeta.csv")
     recording_meta_files = glob.glob(input_root_path + recording_name + "*_recordingMeta.csv")
     if len(tracks_files) == 0 or len(static_tracks_files) == 0 or len(recording_meta_files) == 0:

@@ -55,19 +55,19 @@ def read_tracks(track_file, static_info):
     df_meta = pandas.read_csv(static_info)
     
     #filter some of the parked vehicles , EXCEPT FOR VISUALIZATION
-    if test == False:
+    if test == True:
 
         max_num_frames = df_meta['numFrames'].max()
         id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
-        del id_parked_objects[-10:]  #keep 10 parked cars
+        #del id_parked_objects[-10:]  #keep 10 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
-    
+    '''    
         #filter out no-car or ped objects
         list_car_obj = list(df_meta[df_meta['class']=='car'].trackId)
         list_ped_obj = list(df_meta[df_meta['class']=='pedestrian'].trackId)
         list_car_obj.extend(list_ped_obj)
         df = df[df['trackId'].isin(list_car_obj)]   #[~df['trackId'].isin(list_no_car_obj)]
-        
+    '''
 
     # To extract every track, group the rows by the track id
     raw_tracks = df.groupby(["frame"], sort=False)
@@ -103,8 +103,8 @@ def read_tracks(track_file, static_info):
                                                     track["lengthVis"], track["widthVis"],
                                                     np.deg2rad(track["headingVis"]))
         '''
-        #Keep only frames to 1Hz -> 25 ,  2.5Hz ->10
-        ratio = 20 if herz==1.5 else 25
+        #Keep only frames to 1Hz -> 25 ,  2.5Hz ->10, 1.5 -> 20
+        ratio = 10 if herz==2.5 else 25
         if frame%ratio == 0:
             tracks.append(track)
     return tracks
@@ -120,9 +120,13 @@ def read_static_info(static_tracks_file):
     mapping_dict={
         'class':{
             'car':1,
-            'truck_bus':3,
             'pedestrian':2,
+            'truck_bus':3, #truck_bus
             'bicycle':4,
+            #'van': 5,
+            #'motorcycle': 6,
+            #'trailer': 7,
+            #'bus': 8
         }
     }
 
@@ -215,6 +219,8 @@ def pol2cart(th, r):
 def process_data(tracks,static_info, start_ind, end_ind, observed_last):
     #tracks es una lista de dict donde cada fila es un frame
     #static info es una lista de dict [{column->value},{},...]
+    if observed_last>240: #EL ultimo que sale es obs_last 238 y end 250
+        print('stop')
     visible_object_id_list = tracks[observed_last]["trackId"] # object_id appears at the last observed frame
     #para ver los obj visibles en esa secuencia miramos el final de la sec
     num_visible_object = visible_object_id_list.size # number of current observed objects
@@ -278,8 +284,7 @@ def generate_train_data(file_track_path, file_static_path):
     all_adjacency_list = []
     all_mean_list = []
     visible_object_indexes_list=[]
-    step = history_frames if test else 3  #for 1Hz
-    #step = 3 if herz==1.5 else 2
+    step = 3 if herz==2.5 else 3
     for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
@@ -318,7 +323,7 @@ def generate_data(file_tracks_list, file_static_list):
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
     all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/ind_val_pedcar_3s.pkl'
+    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/inD_2.5Hz8_12f_30_noparked.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')
@@ -326,12 +331,12 @@ def generate_data(file_tracks_list, file_static_list):
 
 if __name__ == '__main__':
 
-    test = False
-    herz = 1
-    history_frames = 3 if herz==1 else 4 # 5 second * 1 frame/second
-    future_frames = 3 if herz==1 else 4 # 5 second * 1 frame/second
+    test = True
+    herz = 2.5
+    history_frames = 3 if herz==1 else 8 # 5 second * 1 frame/second
+    future_frames = 3 if herz==1 else 12 # 5 second * 1 frame/second
     total_frames = history_frames + future_frames
-    input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'
+    input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/debug_30/'
     tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracks.csv")))
     static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracksMeta.csv")))
     recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "*_recordingMeta.csv")))

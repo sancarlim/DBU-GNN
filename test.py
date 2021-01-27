@@ -38,21 +38,20 @@ import argparse
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--goal', type=str , default='test' ,help='metrics / visualize model weights')
-parser.add_argument('--recording', type=int , default=0 )
-parser.add_argument('--frame', type=int , default=4175 )
+parser.add_argument('--goal', type=str , default='att_vis' ,help='metrics / visualize model weights')
+parser.add_argument('--recording', type=int , default=7 )
+parser.add_argument('--frame', type=int , default=730 )
 parser.add_argument('--dataset', type=str , default='ind' )
 parser.add_argument('--target', type=int , default=5, help='Output to be predicted' )
 args = parser.parse_args()
 dataset = args.dataset  
 
-def seed_torch(seed=0):
-    random.seed(seed)
+def seed_torch(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    np.random.seed(0)
+    np.random.seed(seed)
     #torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
@@ -65,7 +64,7 @@ def collate_test(samples):
     masks = torch.vstack(masks)
     feats = torch.vstack(feats)
     gt = torch.vstack(gt).float()
-    track_info = torch.vstack(track_info)
+    track_info = np.vstack(track_info)
     sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
     snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
     snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
@@ -73,7 +72,7 @@ def collate_test(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, track_info.detach().cpu().numpy(), mean_xy[0], feats, gt, obj_class[0].numpy()
+    return batched_graph, masks, snorm_n, snorm_e, track_info, mean_xy[0], feats, gt, obj_class[0]
 
 #CAPTUM
 # Helper method to print importances and visualize distribution
@@ -98,7 +97,10 @@ def model_forward_ig(edge_mask, graph, feats, snorm_n, snorm_e):
         norm = graph.edata['norm']
         out = model(graph, feats,edge_mask, rel_type,norm)
     else:
-        out,_,_ = model(graph, feats,edge_mask,snorm_n,snorm_e)
+        if model_type == 'gat':
+            out,_,_ = model(graph, feats,edge_mask,snorm_n,snorm_e)
+        else:
+            out = model(graph, feats,edge_mask,snorm_n,snorm_e)
 
     return out
 
@@ -114,12 +116,14 @@ def explain(data, feats, snorm_n, snorm_e, target=1):
         edge_mask = edge_mask / edge_mask.max()
     return edge_mask
 
-def draw_graph(g, xy, track_info, edge_mask=None, draw_edge_labels=False):
-    g = dgl.to_networkx(g, edge_attrs=['w'])
+def draw_graph(g_in, xy, track_info, edge_mask=None, draw_edge_labels=False):
+    g = dgl.to_networkx(g_in, edge_attrs=['w'])
     node_labels = {}
     pos={}
+    #g.remove_edges_from([(3,16),(4,16),(5,16),(6,16),(7,16),(8,16),(9,16),(10,16)])
+    #g.edges([3,4,5,6,7,8,9,10])
     for u in g.nodes():
-        node_labels[u] = track_info[u,2,2] #track_id
+        node_labels[u] = int(track_info[u,history_frames-1,2]) #track_id
         pos[u] = xy[u].tolist()
 
     #pos = nx.planar_layout(g)
@@ -131,9 +135,9 @@ def draw_graph(g, xy, track_info, edge_mask=None, draw_edge_labels=False):
         edge_mask = edge_mask.flatten().tolist()
         edge_color = [edge_mask[i] for i,(u, v) in enumerate(g.edges())]
         widths = [x * 10 for x in edge_color]
-    nx.draw(g, pos=pos, labels=node_labels, width=widths*1000,
+    nx.draw(g, pos=pos, labels=node_labels, width=widths,
             edge_color=edge_color, edge_cmap=plt.cm.Blues,
-            node_color='azure')
+            node_color='azure', arrows=False)
     
     if draw_edge_labels and edge_mask is not None:
         edge_labels = {k: ('%.2f' % v) for k, v in edge_mask.items()}    
@@ -186,9 +190,11 @@ def visualize(LitGCN_sys,test_dataloader):
     iter_dataloader = iter(test_dataloader)
     graph, masks, snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
 
-    while (track_info[0,0,0]!=args.recording or track_info[0,2,1]<args.frame):
+    while (track_info[0,history_frames-1,0]!=args.recording or track_info[0,history_frames-1,1]<args.frame):
         graph, masks, snorm_n, snorm_e,track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
-    print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,2,1]))
+        #if track_info[0,0,0] == args.recording:
+        #print(track_info[0,history_frames-1,1])
+    print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,history_frames-1,1]))
 
     LitGCN_sys.model.eval()
     model= LitGCN_sys.model
@@ -204,21 +210,32 @@ def visualize(LitGCN_sys,test_dataloader):
     '''
     edge_mask = explain(graph, feats, snorm_n, snorm_e, target=args.target)
     graph.edata['w'] = torch.from_numpy(edge_mask)
-    draw_graph(graph, feats.float()[:,2,:2],track_info, edge_mask, draw_edge_labels=False)
+    draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, edge_mask, draw_edge_labels=False)
 
 def visualize_att(LitGCN_sys,test_dataloader):
     iter_dataloader = iter(test_dataloader)
     graph, masks, snorm_n, snorm_e, track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
 
-    while (track_info[0,0,0]!=args.recording or track_info[0,2,1]<args.frame):
+    while (track_info[0,0,0]!=args.recording or track_info[0,history_frames-1,1]<args.frame):
         graph, masks, snorm_n, snorm_e,track_info, mean_xy, feats, labels, obj_class = next(iter_dataloader)
-    print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,2,1]))
+        
+    print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,history_frames-1,1]))
 
     LitGCN_sys.model.eval()
     model= LitGCN_sys.model
     out, att1, att2 = model_forward(feats, graph, snorm_n, snorm_e)
-    draw_graph(graph, feats.float()[:,2,:2],track_info, att1, draw_edge_labels=False)
-    draw_graph(graph, feats.float()[:,2,:2],track_info, att2, draw_edge_labels=False)
+    if heads == 1:
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1, draw_edge_labels=False)
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att2, draw_edge_labels=False)
+    else:
+        print('First Head:')
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1[0], draw_edge_labels=False)
+        print('Second Head:')
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1[1], draw_edge_labels=False)
+        print('Third Head:')
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1[2], draw_edge_labels=False)
+        print('Second GAT Layer:')
+        draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att2[0], draw_edge_labels=False)
 
 
 class LitGNN(pl.LightningModule):
@@ -239,6 +256,10 @@ class LitGNN(pl.LightningModule):
         self.overall_loss_ped=[]
         self.overall_long_err_ped=[]
         self.overall_lat_err_ped=[]
+
+        self.overall_loss_bic=[]
+        self.overall_long_err_bic=[]
+        self.overall_lat_err_bic=[]
 
         #For visualization purposes
         self.pred_x_list = []
@@ -375,16 +396,17 @@ class LitGNN(pl.LightningModule):
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         
         #For visualization purposes
-        self.gt_x_list.append((labels[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
-        self.gt_y_list.append((labels[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
-        self.pred_x_list.append((pred[:,:,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  #Lista donde cada elemento array (V*T_pred) (V1,V2,V3...)
-        self.pred_y_list.append((pred[:,:,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  
+        self.gt_x_list.append((labels[:,:self.future_frames,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
+        self.gt_y_list.append((labels[:,:self.future_frames,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
+        self.pred_x_list.append((pred[:,:self.future_frames,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  #Lista donde cada elemento array (V*T_pred) (V1,V2,V3...)
+        self.pred_y_list.append((pred[:,:self.future_frames,1].detach().cpu().numpy().reshape(-1)+mean_xy[1])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))  
         self.track_info_list.append(track_info[:,self.history_frames:self.total_frames,:].reshape(-1,track_info.shape[-1])) # V*T_pred, 6 (recording_id,frame,id, l,w,class)
-        
-        car_ids = [i for i, value in enumerate(obj_class) if value in [1,3,5,7,8]]
-        ped_ids = [i for i, value in enumerate(obj_class) if value==2]
 
-        _, overall_num_list, x2y2_error_list = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
+        car_ids = [i for i, value in enumerate(obj_class) if value in [1,3]]
+        ped_ids = [i for i, value in enumerate(obj_class) if value==2]
+        bic_ids = [i for i, value in enumerate(obj_class) if value==4]
+
+        _, overall_num_list, x2y2_error_list = self.compute_RMSE_batch(pred[:,:self.future_frames], labels[:,:self.future_frames], output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
         overall_loss_all = np.sum((x2y2_error_list[0]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
         if len(car_ids) != 0:
             self.overall_loss_car.append(np.sum((x2y2_error_list[1]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[1].detach().cpu().numpy(), axis=0) )#T
@@ -394,10 +416,14 @@ class LitGNN(pl.LightningModule):
             self.overall_loss_ped.append(np.sum((x2y2_error_list[2]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[2].detach().cpu().numpy(), axis=0) )#T
             if np.isnan(self.overall_loss_ped[-1]).any():
                 self.overall_loss_ped[-1][np.isnan(self.overall_loss_ped[-1])] = 0
+        if len(bic_ids) != 0:
+            self.overall_loss_bic.append(np.sum((x2y2_error_list[2]**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[2].detach().cpu().numpy(), axis=0) )#T
+            if np.isnan(self.overall_loss_bic[-1]).any():
+                self.overall_loss_bic[-1][np.isnan(self.overall_loss_bic[-1])] = 0
 
         overall_loss_all[np.isnan(overall_loss_all)]=0
 
-        long_err_list, lat_err_list = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
+        long_err_list, lat_err_list = self.compute_long_lat_error(pred[:,:self.future_frames], labels[:,:self.future_frames], output_masks[:,self.history_frames:self.total_frames,:], car_ids, ped_ids)
 
         overall_long_err = np.sum(long_err_list[0].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
         overall_lat_err = np.sum(lat_err_list[0].detach().cpu().numpy(),axis=0) / np.sum(overall_num_list[0].detach().cpu().numpy(), axis=0) #T
@@ -419,22 +445,35 @@ class LitGNN(pl.LightningModule):
         #print('per sec long_err:{}, Sum{}'.format(overall_long_err, np.sum(overall_long_err)))
         #print('per sec lat_err:{}, Sum{}'.format(overall_lat_err, np.sum(overall_lat_err)))
         
-        self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_1": torch.tensor(overall_loss_all[:1]), "test/loss_2": torch.tensor(overall_loss_all[1:2]), "test/loss_3": torch.tensor(overall_loss_all[2:]) })
-        if self.future_frames == 5:
-            self.log_dict({ "test/loss_4": torch.tensor(overall_loss_all[3:4]), "test/loss_5": torch.tensor(overall_loss_all[4:])})
-
-
+        if self.future_frames == 3:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_1": torch.tensor(overall_loss_all[:1]), "test/loss_2": torch.tensor(overall_loss_all[1:2]), "test/loss_3": torch.tensor(overall_loss_all[2:]) })
+        elif self.future_frames == 6:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_1": torch.tensor(overall_loss_all[1:2]), "test/loss_2": torch.tensor(overall_loss_all[3:4]), "test/loss_3": torch.tensor(overall_loss_all[-1:]) })
+        
+        elif self.future_frames == 5:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_1": torch.tensor(overall_loss_all[:1]), "test/loss_2": torch.tensor(overall_loss_all[1:2]), "test/loss_3": torch.tensor(overall_loss_all[2:]), "test/loss_4": torch.tensor(overall_loss_all[3:4]), "test/loss_5": torch.tensor(overall_loss_all[-1:]) })
+        elif self.future_frames == 8:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_0.8": torch.tensor(overall_loss_all[1:2]), "test/loss_2": torch.tensor(overall_loss_all[4:5]), "test/loss_2.8": torch.tensor(overall_loss_all[6:7]), "test/loss_3.2": torch.tensor(overall_loss_all[-1:]) })
+        elif self.future_frames == 12:
+            self.log_dict({'Sweep/test_loss': np.sum(overall_loss_all), "test/loss_0.8": torch.tensor(overall_loss_all[1:2]), "test/loss_2": torch.tensor(overall_loss_all[4:5]), "test/loss_2.8": torch.tensor(overall_loss_all[6:7]), "test/loss_4": torch.tensor(overall_loss_all[9:10]), "test/loss_4.8": torch.tensor(overall_loss_all[-1:]) })
+        
     def on_test_epoch_end(self):
         overall_loss_car = np.array(self.overall_loss_car)
         avg = [sum(overall_loss_car[:,i])/overall_loss_car.shape[0] for i in range(overall_loss_car.shape[1])]
         var = [sum((overall_loss_car[:,i]-avg[i])**2)/overall_loss_car.shape[0] for i in range(overall_loss_car.shape[1])]
-        print('CAR Loss avg: ',avg)
-        print('CAR Loss variance: ',var)
+        print('CAR Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
+        print('CAR Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
         overall_loss_ped = np.array(self.overall_loss_ped)
         avg = [sum(overall_loss_ped[:,i])/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
         var = [sum((overall_loss_ped[:,i]-avg[i])**2)/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
-        print('VRU Loss avg: ',avg)
-        print('VRU Loss variance: ',var)
+        print('VRU Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
+        print('VRU Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
+
+        overall_loss_bic = np.array(self.overall_loss_bic)
+        avg = [sum(overall_loss_bic[:,i])/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
+        var = [sum((overall_loss_bic[:,i]-avg[i])**2)/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
+        print('Bicycle Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
+        print('Bicycle Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
 
         overall_long_err = np.array(self.overall_long_err_car)
         avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
@@ -443,8 +482,8 @@ class LitGNN(pl.LightningModule):
         overall_lat_err = np.array(self.overall_lat_err_car)
         avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
         var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
-        print('\n'.join('CAR Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-        print('\n'.join('CAR Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+        print('\n'.join('CAR Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+        print('\n'.join('CAR Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
         overall_long_err = np.array(self.overall_long_err_ped)
         avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
@@ -453,8 +492,8 @@ class LitGNN(pl.LightningModule):
         overall_lat_err = np.array(self.overall_lat_err_ped)
         avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
         var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
-        print('\n'.join('PED Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-        print('\n'.join('PED Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+        print('\n'.join('PED Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+        print('\n'.join('PED Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
 
         #For visualization purposes
@@ -471,37 +510,38 @@ class LitGNN(pl.LightningModule):
             'obj_id': np.concatenate(obj_id_list,axis=0)
         }
 
-        '''
+
         df_vis = pd.DataFrame.from_dict(track_vis_dict)   #1935(xVxTpred)x5
         raw_preds = df_vis.groupby(['recording_id'])
         for csv in raw_preds:
-            csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/val_test_data/'+str(int(csv[0]))+'_vrus_preds.csv')
-        '''
+            csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/data/'+str(int(csv[0]))+'_pred.csv')
+        
 
 
 if __name__ == "__main__":
 
-    hidden_dims = 512
+    hidden_dims = 1024
     heads = 3
     model_type = 'gat'
-    history_frames = 3
-    future_frames= 3
-
+    history_frames = 8
+    future_frames= 12
+    recording = args.recording
     if dataset.lower() == 'ind':
-        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes=(1,3))  #1935
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes=(1,2,3,4), recording=recording)  #1935
         print(len(test_dataset))
     else:
-        test_dataset = roundD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes= (1,2,3,4,5,6,7,8))
+        test_dataset = roundD_DGLDataset(recording=recording, train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes= (1,2,3,4,5,6,7,8))
         print(len(test_dataset))
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_test)  
-
+    print('Recording: ', recording)
     input_dim = 5*history_frames
     output_dim = 2*future_frames
 
     if model_type == 'gat':
         hidden_dims = round(hidden_dims/heads)
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
-        if args.goal != 'test':
+        if args.goal == 'test':
+            model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.25, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
+        else:
             model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
@@ -510,16 +550,20 @@ if __name__ == "__main__":
     elif model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=True, bn=False, dropout=0.1)
     
-
+    if dataset == 'round' and future_frames==12:
+        future_frames = 8
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/w63u5of1/checkpoints/'+'epoch=90.ckpt',model=LitGCN_sys.model)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/DGX/sweet-sweep-2/epoch=16-step=9332.ckpt',model=LitGCN_sys.model)
+    #DGX/gxxhzlvu/checkpoints/epoch=93-step=3289.ckpt ESTE ES EL DE 8.89 DE LA DGX
+    #e44289k5/checkpoints/'+'epoch=49.ckpt
+    
     LitGCN_sys.model_type = model_type
     LitGCN_sys.history_frames = history_frames
     LitGCN_sys.future_frames = future_frames
     LitGCN_sys.total_frames = history_frames+future_frames
 
     if args.goal  == 'test':
-        trainer = pl.Trainer(gpus=0, profiler=True)
+        trainer = pl.Trainer(gpus=1, profiler=True)
         trainer.test(LitGCN_sys, test_dataloaders=test_dataloader)
     elif args.goal == 'vis':
         visualize(LitGCN_sys, test_dataloader)
