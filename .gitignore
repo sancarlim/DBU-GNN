@@ -152,3 +152,8 @@ wandb
 /Apollo_Challenge/
 test_Apollo.py
 Graph_InitialTests.ipynb
+
+/data
+launch.json
+*.pth
+*.sh
