@@ -36,9 +36,9 @@ from captum.attr import LayerConductance, LayerIntegratedGradients
 from captum.attr import NeuronConductance
 import argparse
 
-
+device='cuda'
 parser = argparse.ArgumentParser()
-parser.add_argument('--goal', type=str , default='att_vis' ,help='metrics / visualize model weights')
+parser.add_argument('--goal', type=str , default='vis' ,help='metrics / visualize model weights')
 parser.add_argument('--recording', type=int , default=7 )
 parser.add_argument('--frame', type=int , default=730 )
 parser.add_argument('--dataset', type=str , default='ind' )
@@ -96,21 +96,25 @@ def model_forward_ig(edge_mask, graph, feats, snorm_n, snorm_e):
         rel_type = graph.edata['rel_type'].long()
         norm = graph.edata['norm']
         out = model(graph, feats,edge_mask, rel_type,norm)
+    elif model_type == 'gat':
+        out,_,_ = model(graph, feats,edge_mask,snorm_n,snorm_e)
     else:
-        if model_type == 'gat':
-            out,_,_ = model(graph, feats,edge_mask,snorm_n,snorm_e)
-        else:
-            out = model(graph, feats,edge_mask,snorm_n,snorm_e)
+        out = model(graph, feats,edge_mask,snorm_n,snorm_e)
 
     return out
 
 def explain(data, feats, snorm_n, snorm_e, target=1):
-    input_mask = data.edata['w'].requires_grad_(True)
+    input_mask = (data.edata['w']).requires_grad_(True).to(device) 
     ig = IntegratedGradients(model_forward_ig)
     mask = ig.attribute(input_mask, target=target,
                         additional_forward_args=(data,feats, snorm_n,snorm_e,),
-                        internal_batch_size=data.edata['w'].shape[0])
-
+                        internal_batch_size=data.edata['w'].shape[0]) #, return_convergence_delta=True
+    '''
+    elif method == 'saliency':
+        saliency = Saliency(model_forward)
+        mask = saliency.attribute(input_mask, target=target,
+                                  additional_forward_args=(data,))
+    '''
     edge_mask = np.abs(mask.cpu().detach().numpy())
     if edge_mask.max() > 0:  # avoid division by zero
         edge_mask = edge_mask / edge_mask.max()
@@ -197,7 +201,7 @@ def visualize(LitGCN_sys,test_dataloader):
     print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,history_frames-1,1]))
 
     LitGCN_sys.model.eval()
-    model= LitGCN_sys.model
+    model= LitGCN_sys.model.to(device)
     model_type = LitGCN_sys.model_type
     
     '''
@@ -208,7 +212,7 @@ def visualize(LitGCN_sys,test_dataloader):
     cond_vals = cond_vals.detach().numpy()
     visualize_importances(range(64),np.mean(cond_vals, axis=0),title="Average Neuron Importances", axis_title="Neurons")
     '''
-    edge_mask = explain(graph, feats, snorm_n, snorm_e, target=args.target)
+    edge_mask = explain(graph.to(device), feats.to(device), snorm_n, snorm_e, target=args.target)
     graph.edata['w'] = torch.from_numpy(edge_mask)
     draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, edge_mask, draw_edge_labels=False)
 
@@ -222,8 +226,8 @@ def visualize_att(LitGCN_sys,test_dataloader):
     print('Rec: {} Actual Frame: {}'.format(track_info[0,0,0],track_info[0,history_frames-1,1]))
 
     LitGCN_sys.model.eval()
-    model= LitGCN_sys.model
-    out, att1, att2 = model_forward(feats, graph, snorm_n, snorm_e)
+    model= LitGCN_sys.model.to(device)
+    out, att1, att2 = model_forward(feats.to(device), graph.to(device), snorm_n, snorm_e)
     if heads == 1:
         draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1, draw_edge_labels=False)
         draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att2, draw_edge_labels=False)
@@ -542,7 +546,7 @@ if __name__ == "__main__":
         if args.goal == 'test':
             model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.25, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
         else:
-            model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
+            model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True).to(device)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
@@ -553,7 +557,7 @@ if __name__ == "__main__":
     if dataset == 'round' and future_frames==12:
         future_frames = 8
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/DGX/sweet-sweep-2/epoch=16-step=9332.ckpt',model=LitGCN_sys.model)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/DGX/iconic-sweep-5/epoch=19-step=7219.ckpt',model=LitGCN_sys.model)
     #DGX/gxxhzlvu/checkpoints/epoch=93-step=3289.ckpt ESTE ES EL DE 8.89 DE LA DGX
     #e44289k5/checkpoints/'+'epoch=49.ckpt
     
