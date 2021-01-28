@@ -247,7 +247,7 @@ class LitGNN(pl.LightningModule):
             #USE CHANGE IN POS AS INPUT
             feats_vel, labels_vel = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -259,7 +259,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
 
         #Socially consistent
@@ -299,7 +299,7 @@ class LitGNN(pl.LightningModule):
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -310,7 +310,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:], e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         '''
         # Compute predicted trajs.
@@ -345,7 +345,7 @@ class LitGNN(pl.LightningModule):
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim//2+1], feats_vel], dim=-1)
+            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -356,7 +356,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         # Compute predicted trajs.
         '''
@@ -469,14 +469,14 @@ if __name__ == '__main__':
 
     history_frames = args.history_frames
     future_frames = args.future_frames
-    
+    print(args.norm)
     if dataset.lower() == 'apollo':
         train_dataset = ApolloScape_DGLDataset(train_val='train', norm=args.norm, test=False) #3447
         val_dataset = ApolloScape_DGLDataset(train_val='val', norm=args.norm, test=False)  #919
         #test_dataset = ApolloScape_DGLDataset(train_val='test', test=False)  #230
         print(len(train_dataset), len(val_dataset))
         print('norm: ', args.norm)
-        input_dim = [6] if args.apollo_vel else 3
+        input_dim = [3] if args.apollo_vel else 3
     elif dataset.lower() == 'ind':
         train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4)) #12281
         val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4))  #3509
@@ -493,15 +493,15 @@ if __name__ == '__main__':
     
     if args.model == 'gat':
         bn = [False]
-        heads = [3]
+        heads = [2,3]
         att_ew = [True]
-        bs = [512]
-        lr=[3e-4, 1e-4]
+        bs = [256,512]
+        lr=[5e-5]
         alfa = [3]
         beta = [0,1]
         delta = [0.1,1]
         attn_drop = [0.]
-        hidden_dims = [1024]
+        hidden_dims = [768,1024]
     else:
         heads = [1]
         attn_drop = [0.]
@@ -517,7 +517,7 @@ if __name__ == '__main__':
 
     sweep_config = {
     "name": args.name,
-    "method": "grid",
+    "method": "random",
     "metric": {
         'name': 'Sweep/val_loss',
         'goal': 'minimize'   
@@ -570,7 +570,7 @@ if __name__ == '__main__':
                 #"distribution": 'uniform',
                 #"min": 0.01,
                 #"max": 0.5
-                "values": [0.25]
+                "values": [0.1]
             },
             "alfa": {
                 #"distribution": 'uniform',
@@ -604,7 +604,7 @@ if __name__ == '__main__':
                 #"distribution": 'log_uniform',
                 #"max": -1,
                 #"min": -3
-                "values": [0.1]
+                "values": [0.1,0.01]
             },
             "heads": {
                 "values": heads
@@ -625,7 +625,7 @@ if __name__ == '__main__':
 
     
 
-    sweep_id = wandb.sweep(sweep_config, project="dbu_graph")
+    sweep_id = wandb.sweep(sweep_config, project="dbu_graph", entity='sandracl72')
     wandb.agent(sweep_id, sweep_train, count=args.count)
     #sweep_train()
 
