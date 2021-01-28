@@ -242,7 +242,7 @@ class LitGNN(pl.LightningModule):
         
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        last_loc = feats[:,-1:,:2]
+        #last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel, labels_vel = self.compute_change_pos(feats,labels)
@@ -294,7 +294,7 @@ class LitGNN(pl.LightningModule):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels = val_batch
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        last_loc = feats[:,-1:,:2]
+        #last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
@@ -340,7 +340,7 @@ class LitGNN(pl.LightningModule):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels = test_batch
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        last_loc = feats[:,-1:,:2]
+        #last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
@@ -424,7 +424,12 @@ def sweep_train():
     print('config: ', dict(config))
     wandb_logger = pl_loggers.WandbLogger()  #name=
      
-    input_dim = config.input_dim*config.history_frames
+    if dataset == 'apollo' and args.apollo_vel:
+        input_dim = (config.input_dim+2)*config.history_frames
+        print(input_dim)
+    else:
+        input_dim = config.input_dim*config.history_frames
+
     output_dim = 2*config.future_frames if config.probabilistic == False else 5*config.future_frames
 
     if config.model_type == 'gat':

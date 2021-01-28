@@ -129,7 +129,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             total_valid_num = len(id_list)
             ind=np.random.permutation(id_list)
             self.train_id_list, self.val_id_list = ind[:round(total_valid_num*0.9)], ind[round(total_valid_num*0.9):]
-            print(self.train_id_list.shape)
+
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
         
