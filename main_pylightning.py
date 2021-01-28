@@ -240,26 +240,22 @@ class LitGNN(pl.LightningModule):
         
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels = train_batch
         
-        #feats = batched_graph.ndata['x']
-        #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        #last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
-            feats_vel, labels_vel = self.compute_change_pos(feats,labels)
+            feats_vel, labels = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+            feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.unsqueeze(1)
-            
 
         if self.model_type == 'rgcn':
             rel_type = batched_graph.edata['rel_type'].long()
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
 
         #Socially consistent
@@ -280,26 +276,19 @@ class LitGNN(pl.LightningModule):
         #self.logger.agg_and_log_metrics({"Train/loss": total_loss.data.item()}, step=self.current_epoch)
         self.log("Sweep/train_loss",  total_loss.data.item(), on_step=False, on_epoch=True)
         return total_loss
-    '''
-    def training_epoch_end(self, total_loss):
-        self.epoch += 1
-        print('|{}| Train_loss: {}'.format(datetime.now(), np.sum(self.overall_loss_train)/len(self.overall_loss_train)))
-        #self.log("Train/Loss", np.sum(self.overall_loss_train)/len(self.overall_loss_train) )
-        self.logger.log_metrics({"Train/loss": np.sum(self.overall_loss_train)/len(self.overall_loss_train)}, step=self.epoch)
-        #wandb.log({"Train/loss": np.sum(self.overall_loss_train)/len(self.overall_loss_train)}, step=self.epoch)#, step=epoch)      
-        self.overall_loss_train=[]
-    '''
+
+
     def validation_step(self, val_batch, batch_idx):
         
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels = val_batch
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        #last_loc = feats[:,-1:,:2]
+        last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+            feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -310,14 +299,14 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:], e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
-        '''
+        
         # Compute predicted trajs.
-        for i in range(1,feats.shape[1]):
-            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2  
+        for i in range(1,labels.shape[1]):
+            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2  
         pred += last_loc
-        '''
+        
         _ , overall_num, x2y2_error,_ = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(), axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0)#T
         self.log( "Sweep/val_loss", np.sum(overall_loss_time), sync_dist=True )
@@ -325,27 +314,17 @@ class LitGNN(pl.LightningModule):
         mse_overall_loss_time =np.sum(np.sum(x2y2_error.detach().cpu().numpy(), axis=0)) / np.sum(np.sum(overall_num.detach().cpu().numpy(), axis=0)) 
         #self.logger.agg_and_log_metrics({'val/Loss':mse_overall_loss_time}, step= self.current_epoch) #aggregate loss for epochs
 
-    '''    
-    def validation_epoch_end(self, val_results):
-        overall_sum_time=np.sum(self.overall_x2y2_list,axis=0)  #BV,T->T RMSE medio en cada T
-        overall_num_time =np.sum(self.overall_num_list, axis=0)
-        overall_loss_time=(overall_sum_time / overall_num_time) #media del error de cada agente en cada frame
-        self.overall_num_list=[]
-        self.overall_x2y2_list=[]
-        
-        #self.logger.log_metrics({'val/Loss':np.sum(overall_loss_time)}, step= self.epoch)
-        #wandb.log({"Val/Loss": np.sum(overall_loss_time)}, step= self.epoch)
-    '''
+ 
     def test_step(self, test_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels = test_batch
         #feats = batched_graph.ndata['x']
         #labels= batched_graph.ndata['gt'][:,:,:2].float()
-        #last_loc = feats[:,-1:,:2]
+        last_loc = feats[:,-1:,:2]
         if dataset.lower() == 'apollo' and args.apollo_vel:
             #USE CHANGE IN POS AS INPUT
             feats_vel,_ = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
-            feats = torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+            feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
 
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
@@ -356,14 +335,13 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:],e_w,snorm_n,snorm_e)
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
         pred=pred.view(pred.shape[0],labels.shape[1],-1)
         # Compute predicted trajs.
-        '''
-        for i in range(1,feats.shape[1]):
-            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-1) #BV,6,2 
+        for i in range(1,labels.shape[1]):
+            pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2 
         pred += last_loc
-        '''
+        
         _, overall_num, x2y2_error,_ = self.compute_RMSE_batch(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         long_err, lat_err, _ = self.compute_long_lat_error(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
         overall_loss_time = np.sum((x2y2_error**0.5).detach().cpu().numpy(),axis=0) / np.sum(overall_num.detach().cpu().numpy(), axis=0) #T
@@ -423,13 +401,8 @@ def sweep_train():
 
     print('config: ', dict(config))
     wandb_logger = pl_loggers.WandbLogger()  #name=
-     
-    if dataset == 'apollo' and args.apollo_vel:
-        input_dim = (config.input_dim+2)*config.history_frames
-        print(input_dim)
-    else:
-        input_dim = config.input_dim*config.history_frames
-
+    
+    input_dim = config.input_dim*5 if dataset=='apollo' else config.input_dim*config.history_frames
     output_dim = 2*config.future_frames if config.probabilistic == False else 5*config.future_frames
 
     if config.model_type == 'gat':
@@ -481,7 +454,7 @@ if __name__ == '__main__':
         #test_dataset = ApolloScape_DGLDataset(train_val='test', test=False)  #230
         print(len(train_dataset), len(val_dataset))
         print('norm: ', args.norm)
-        input_dim = [3] if args.apollo_vel else 3
+        input_dim = [4] 
     elif dataset.lower() == 'ind':
         train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4)) #12281
         val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model, classes=(1,2,3,4))  #3509

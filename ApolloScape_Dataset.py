@@ -78,7 +78,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 2]   #frame,obj,type,x,y,z,l,w,h,heading, QUITO [visible_mask]
+        feature_id = [3, 4, 9, 2]   #frame,obj,type,x,y,z,l,w,h,heading, QUITO [visible_mask]
             
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].astype('int')  # torch Tensor NxVxT
@@ -157,8 +157,9 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             if graph.in_degrees(n) == 0:
                 graph.add_edges(n,n)
         '''
-        now_mean_xy=self.all_mean_xy[idx].copy()
         #Data Augmentation
+        '''
+        now_mean_xy=self.all_mean_xy[idx].copy()
         if self.train_val.lower() == 'train' and np.random.random()>0.5:
             angle = 2 * np.pi * np.random.random()
             sin_angle = np.sin(angle)
@@ -179,7 +180,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             xy = xy.transpose(2,1,0) #VTC
 
             self.node_features[idx,:self.last_vis_obj[idx],:,:2] = xy
-
+        '''
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
