@@ -154,9 +154,17 @@ test_Apollo.py
 Graph_InitialTests.ipynb
 
 /data
-launch.json
 *.pth
 *.sh
 *.yml
 *.yaml
 *workspace
+*.json
+*.txt
+
+/GRIP/
+ApolloScape
+ApolloScape_process.py
+models/GCN.py
+models/Gated_GCN.py
+models/GCN.py

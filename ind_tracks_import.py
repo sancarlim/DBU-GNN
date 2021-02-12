@@ -55,19 +55,19 @@ def read_tracks(track_file, static_info):
     df_meta = pandas.read_csv(static_info)
     
     #filter some of the parked vehicles , EXCEPT FOR VISUALIZATION
-    ''' 
+    
     if test == False:
         max_num_frames = df_meta['numFrames'].max()
         id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
         del id_parked_objects[-10:]  #keep 10 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
-     
+        '''
         #filter out no-car or ped objects
         list_car_obj = list(df_meta[df_meta['class']=='car'].trackId)
         list_ped_obj = list(df_meta[df_meta['class']=='pedestrian'].trackId)
         list_car_obj.extend(list_ped_obj)
         df = df[df['trackId'].isin(list_car_obj)]   #[~df['trackId'].isin(list_no_car_obj)]
-    '''
+        '''
 
     # To extract every track, group the rows by the track id
     raw_tracks = df.groupby(["frame"], sort=True)
@@ -123,10 +123,10 @@ def read_static_info(static_tracks_file):
             'pedestrian':2,
             'truck_bus':3, #truck_bus
             'bicycle':4,
-            #'van': 5,
-            #'motorcycle': 6,
-            #'trailer': 7,
-            #'bus': 8
+            #'van': 1,
+            #'motorcycle': 4,
+            #'trailer': 3,
+            #'bus': 3
         }
     }
 
@@ -282,8 +282,7 @@ def generate_train_data(file_track_path, file_static_path):
     all_adjacency_list = []
     all_mean_list = []
     visible_object_indexes_list=[]
-    #step = history_frames if test else 2  #for 1Hz
-    step = 2 if herz==2.5 else 1
+    step = 8
     for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 8+8 frames a 2.5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
@@ -322,7 +321,7 @@ def generate_data(file_tracks_list, file_static_list):
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
     all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = '/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_train.pkl'
+    save_path = '/media/14TBDISK/sandra/inD_processed/inD_test_25m.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')
@@ -335,7 +334,7 @@ if __name__ == '__main__':
     history_frames = 3 if herz==1 else 8 # 5 second * 1 frame/second
     future_frames = 5 if herz==1 else 12 # 5 second * 1 frame/second
     total_frames = history_frames + future_frames
-    input_root_path = '/media/14TBDISK/inD/train_data/'
+    input_root_path = '/media/14TBDISK/inD/test_data/'
     tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracks.csv")))
     static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracksMeta.csv")))
     recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "*_recordingMeta.csv")))

@@ -47,7 +47,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     _raw_dir = '/media/14TBDISK/sandra/apollo_train_data.pkl'
 
     def __init__(self, train_val, norm=True,  test=False, data_path=None):
-        self.raw_dir='/media/14TBDISK/sandra/apollo_train_data.pkl'
+        self.raw_dir='/media/14TBDISK/sandra/apollo_train_data_20m.pkl'
         self.train_val=train_val
         self.test = test
         self.norm = norm
@@ -59,7 +59,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     def load_data(self):
         with open(self.raw_dir, 'rb') as reader:
             # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-            [all_feature, self.all_adjacency, self.all_mean_xy,_]= pickle.load(reader)
+            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
         all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
         self.all_feature=all_feature[:,:70,:,:]#torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
 
@@ -78,7 +78,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
                     self.last_vis_obj.append(i)
                     break   
         
-        feature_id = [3, 4, 9, 2]   #frame,obj,type,x,y,z,l,w,h,heading, QUITO [visible_mask]
+        feature_id = [3, 4, 9, 2, 10]   #frame,obj,type,x,y,z,l,w,h,heading, QUITO [visible_mask]
             
         now_history_frame=6
         object_type = self.all_feature[:,:,:,2].astype('int')  # torch Tensor NxVxT
@@ -95,28 +95,17 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
 
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
-        self.node_features = self.all_feature[:,:,:now_history_frame,feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
+        self.node_features = self.all_feature[:,:,:now_history_frame, feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
         self.node_labels=self.all_feature[:,:,now_history_frame:,[3,4]] #x,y 6 ultimos frames
         #self.node_features[:,:,:,-1] *= mask_car[:,:,:6]   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
         
-        '''
-        scaler=StandardScaler()
-        
-        scale_xy=self.node_features[:,:,:,:2].reshape(self.node_features[:,:,:,:2].shape[0]*self.node_features[:,:,:,:2].shape[1],-1)  #NxV,T*C(x,y)
-        scaler.fit(scale_xy)
-        scaler.transform(scale_xy)
-        self.node_features[:,:,:,:2] = scale_xy.view(self.node_features.shape[0],self.node_features.shape[1],now_history_frame,2)
-        '''
-        
+                
         #EDGES weights  #5010x120x120[]
         self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,5,:], self.node_features[i][:,5,:]) for i in range(len(self.all_feature))]  #5010x70x70
 
         
         if self.test:
             self.output_mask= self.all_feature[:,:,:,-1]#*mask_car[:,:,:6] #mascara obj (car) visibles en 6º frame (5010,120,6,1)
-            
-            # TRAIN VAL SETS
-            # Remove empty rows from output mask 
             #zero_indeces_list = [i for i in range(len(self.output_mask )) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
             self.test_id_list  = list(set(list(range(total_num)))) #- set(zero_indeces_list))
         else:
@@ -127,8 +116,21 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             zero_indeces_list = [i for i in range(len(self.output_mask[:,:,6:] )) if np.all(np.array(self.output_mask[:,:,6:] .squeeze(-1))==0, axis=(1,2))[i] == True ]
             id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
             total_valid_num = len(id_list)
-            ind=np.random.permutation(id_list)
-            self.train_id_list, self.val_id_list = ind[:round(total_valid_num*0.9)], ind[round(total_valid_num*0.9):]
+            
+            self.train_id_list, self.val_id_list = id_list[:round(total_valid_num*0.80)], id_list[round(total_valid_num*0.80):]
+
+            if train_val_test.lower() == 'train':
+                self.all_feature = self.all_feature[train_id_list]  #frame_id, object_id, object_type, position_x, position_y, position_z, object_length, pbject_width, pbject_height, heading
+                self.all_adjacency = self.all_adjacency[train_id_list]
+                self.all_mean_xy = self.all_mean_xy[train_id_list]
+            elif train_val_test.lower() == 'val':
+                self.all_feature = self.all_feature[val_id_list]
+                self.all_adjacency = self.all_adjacency[val_id_list]
+                self.all_mean_xy = self.all_mean_xy[val_id_list]
+            else:
+                self.all_feature = self.all_feature[self.test_id_list]
+                self.all_adjacency = self.all_adjacency[self.test_id_list]
+                self.all_mean_xy = self.all_mean_xy[self.test_id_list]
 
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
@@ -136,57 +138,16 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
 
     def __len__(self):
-        if self.train_val.lower() == 'train':
-            return len(self.train_id_list)
-        elif self.train_val.lower() == 'val':
-            return len(self.val_id_list)
-        else:
-            return len(self.test_id_list)
+        return len(self.train_id_list)
 
     def __getitem__(self, idx):
-        if self.train_val.lower() == 'train':
-            idx = self.train_id_list[idx]
-        elif self.train_val.lower() == 'val':
-            idx = self.val_id_list[idx]
-        else:
-            idx = self.test_id_list[idx]
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
-        '''
-        for n in graph.nodes():
-            if graph.in_degrees(n) == 0:
-                graph.add_edges(n,n)
-        '''
-        #Data Augmentation
-        '''
-        now_mean_xy=self.all_mean_xy[idx].copy()
-        if self.train_val.lower() == 'train' and np.random.random()>0.5:
-            angle = 2 * np.pi * np.random.random()
-            sin_angle = np.sin(angle)
-            cos_angle = np.cos(angle)
 
-            angle_mat =  np.array(
-                [[cos_angle, -sin_angle],
-                [sin_angle, cos_angle]])
-
-            xy = self.node_features[idx,:self.last_vis_obj[idx],:,:2].copy()   #(V,T,C)
-            xy = xy.transpose(2,1,0) # C T V
-            num_xy = np.sum(xy.sum(axis=0).sum(axis=0) != 0) # get the number of valid data
-
-            # angle_mat: (2, 2), xy: ( 2, 12, V)
-            out_xy = np.einsum('ab,btv->atv', angle_mat, xy)
-            now_mean_xy = np.matmul(angle_mat, now_mean_xy)
-            xy[:,:,:num_xy]= out_xy[:,:,:num_xy]
-            xy = xy.transpose(2,1,0) #VTC
-
-            self.node_features[idx,:self.last_vis_obj[idx],:,:2] = xy
-        '''
 
         graph = dgl.add_self_loop(graph)#.to('cuda')
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
-        if self.norm: 
-            norm_distances = [(i-min(distances))/(max(distances)-min(distances)) if (max(distances)-min(distances))!=0 else i for i in distances]
         graph.edata['w']=torch.tensor(distances, dtype=torch.float32)#.to('cuda')
         #graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
         feats = torch.tensor(self.node_features[idx,:self.last_vis_obj[idx]] , dtype=torch.float32)
