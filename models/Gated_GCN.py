@@ -39,9 +39,9 @@ class GatedGCN_layer(nn.Module):
         gain = nn.init.calculate_gain('relu')
         nn.init.xavier_normal_(self.A.weight,gain=gain)
         nn.init.xavier_normal_(self.B.weight, gain=gain)
-        nn.init.xavier_normal_(self.C.weight,gain=gain)
+        nn.init.xavier_normal_(self.C.weight, gain=gain) #sigmoid -> relu
         nn.init.xavier_normal_(self.D.weight, gain=gain)
-        nn.init.xavier_normal_(self.E.weight,gain=gain)
+        nn.init.xavier_normal_(self.E.weight, gain=gain)
 
 
     def message_func(self, edges):
@@ -49,90 +49,52 @@ class GatedGCN_layer(nn.Module):
         # e_ij = Ce_ij + Dhi + Ehj   N*B,256
         e_ij = edges.data['Ce'] + edges.src['Dh'] + edges.dst['Eh'] #n_e,256
         edges.data['e'] = e_ij
-        #VISUALIZE E
-        '''
-        e_ijvis=e_ij.detach().cpu().numpy().astype('uint8')
-        e_ijvis=(e_ijvis*255/np.max(e_ijvis))
-        plt.imshow(e_ijvis, cmap='hot')
-        plt.show()
-        '''
         return {'Bh_j' : Bh_j, 'e_ij' : e_ij}
 
     def reduce_func(self, nodes):
         Ah_i = nodes.data['Ah']
         Bh_j = nodes.mailbox['Bh_j']
         e = nodes.mailbox['e_ij']
-        # sigma_ij = sigmoid(e_ij)
-        torch.clamp(e.sigmoid_(), min=1e-4, max=1-1e-4) 
-        sigma_ij = torch.sigmoid(e)
+        #torch.clamp(e.sigmoid_(), min=1e-4, max=1-1e-4) 
+        sigma_ij = torch.clamp(torch.sigmoid(e), min=1e-4, max=1-1e-4) 
         # hi = Ahi + sum_j eta_ij * Bhj   
         h = Ah_i + torch.sum(sigma_ij * Bh_j, dim=1) / torch.sum(sigma_ij, dim=1)  #shape n_nodes*256
         
-        #VISUALIZE M AND H SIN RESIDUAL CONNECTION, PUERTA ETA
-        '''
-        h0=h.detach().cpu().numpy().astype('uint8')
-        h0=(h0*255/np.max(h0))
-        M = torch.sum(sigma_ij * Bh_j, dim=1) / torch.sum(sigma_ij, dim=1)
-        M=M.detach().cpu().numpy().astype('uint8')
-        M=(M*255/np.max(M))
-        fig,ax=plt.subplots(1,2)
-        im1=ax[0].imshow(h0,cmap='hot',aspect='auto')
-        ax[0].set_title('h',fontsize=8)
-        im2=ax[1].imshow(M,cmap='hot',aspect='auto')
-        ax[1].set_title('Aggregated Message',fontsize=8)
-        fig.colorbar(im1,ax=ax[0])
-        fig.colorbar(im2,ax=ax[1])
-        plt.show()
-        '''
         return {'h' : h}
     
     def forward(self, g, h, e, snorm_n, snorm_e):
-        
-        h_in = h # residual connection
-        e_in = e # residual connection
-        
-        
-        g.ndata['h']  = h
-        g.ndata['Ah'] = self.A(h) 
-        g.ndata['Bh'] = self.B(h) 
-        g.ndata['Dh'] = self.D(h)
-        g.ndata['Eh'] = self.E(h) 
-        g.edata['e']  = e 
-        g.edata['Ce'] = self.C(e)
-        
-        g.update_all(self.message_func, self.reduce_func)
-        
-        h = g.ndata['h'] # result of graph convolution
-        e = g.edata['e'] # result of graph convolution
+        with g.local_scope():
+            h_in = h # residual connection
+            e_in = e # residual connection
+            
+            
+            g.ndata['h']  = h
+            g.ndata['Ah'] = self.A(h) 
+            g.ndata['Bh'] = self.B(h) 
+            g.ndata['Dh'] = self.D(h)
+            g.ndata['Eh'] = self.E(h) 
+            g.edata['e']  = e 
+            g.edata['Ce'] = self.C(e)
+            
+            g.update_all(self.message_func, self.reduce_func)
+            
+            h = g.ndata['h'] # result of graph convolution
+            e = g.edata['e'] # result of graph convolution
 
-        h = h * snorm_n # normalize activation w.r.t. graph node size
-        e = e * snorm_e # normalize activation w.r.t. graph edge size
-        
-        h = self.bn_node_h(h) # batch normalization  
-        e = self.bn_node_e(e) # batch normalization  
-        
-        h = torch.relu(h) # non-linear activation
-        e = torch.relu(e) # non-linear activation
-        
-        h = h_in + h # residual connection
-        e = e_in + e # residual connection
+            h = h * snorm_n # normalize activation w.r.t. graph node size
+            e = e * snorm_e # normalize activation w.r.t. graph edge size
+            
+            h = self.bn_node_h(h) # batch normalization  
+            e = self.bn_node_e(e) # batch normalization  
+            
+            h = torch.relu(h) # non-linear activation
+            e = torch.relu(e) # non-linear activation
+            
+            h = h_in + h # residual connection
+            e = e_in + e # residual connection
 
-        #VISUALIZE E AND H
-        '''
-        hvis=h.detach().cpu().numpy().astype('uint8')
-        hvis=(hvis*255/np.max(hvis))
-        evis=e.detach().cpu().numpy().astype('uint8')
-        evis=(evis*255/np.max(evis))
-        fig,ax=plt.subplots(1,2)
-        im1=ax[0].imshow(hvis,cmap='hot')
-        ax[0].set_title('H_l+1',fontsize=8)
-        im2=ax[1].imshow(evis,cmap='hot')
-        ax[1].set_title('Edges_l+1',fontsize=8)
-        fig.colorbar(im1,ax=ax[0])
-        fig.colorbar(im2,ax=ax[1])
-        plt.show()
-        '''
-        return h, e
+
+            return h, e
 
 
 class GatedGCN(nn.Module):
@@ -156,15 +118,15 @@ class GatedGCN(nn.Module):
     
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        gain = nn.init.calculate_gain('relu')
+        gain = nn.init.calculate_gain('tanh')
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.linear1.weight, gain=gain)
+        nn.init.xavier_normal_(self.linear1.weight)
         nn.init.xavier_normal_(self.embedding_e.weight)
 
     def forward(self, g, inputs, e, snorm_n, snorm_e):
 
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
-        inputs = inputs.view(inputs.shape[0],-1)
+        inputs = inputs.contiguous().view(inputs.shape[0],-1)
 
         # input embedding
         h = self.embedding_h(inputs)
