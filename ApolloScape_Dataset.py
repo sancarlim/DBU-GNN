@@ -44,13 +44,10 @@ def collate_batch(samples):
     return batched_graph, masks, snorm_n, snorm_e, feats, gt
 
 class ApolloScape_DGLDataset(torch.utils.data.Dataset):
-    _raw_dir = '/media/14TBDISK/sandra/apollo_train_data.pkl'
-
-    def __init__(self, train_val, norm=True,  test=False, data_path=None):
-        self.raw_dir='/media/14TBDISK/sandra/apollo_train_data_20m.pkl'
+    def __init__(self, train_val,  test=False, data_path=None):
+        self.raw_dir='/media/14TBDISK/sandra/apollo_train_data.pkl'
         self.train_val=train_val
         self.test = test
-        self.norm = norm
         if test:
             self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_test_data.pkl'
         self.process() 
@@ -59,14 +56,13 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     def load_data(self):
         with open(self.raw_dir, 'rb') as reader:
             # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
+            [all_feature, self.all_adjacency, self.all_mean_xy,_]= pickle.load(reader)
         all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
         self.all_feature=all_feature[:,:70,:,:]#torch.from_numpy(all_feature[:,:70,:,:]).type(torch.float32)#.to('cuda')
 
 
     def process(self):
         #process data to graph, labels, and splitting masks
-
         self.load_data()
         total_num = len(self.all_feature)
         
@@ -93,7 +89,6 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         #rescale_xy=torch.ones((1,1,1,2))
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
-
         #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
         self.node_features = self.all_feature[:,:,:now_history_frame, feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
         self.node_labels=self.all_feature[:,:,now_history_frame:,[3,4]] #x,y 6 ultimos frames
@@ -119,18 +114,22 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             
             self.train_id_list, self.val_id_list = id_list[:round(total_valid_num*0.80)], id_list[round(total_valid_num*0.80):]
 
-            if train_val_test.lower() == 'train':
-                self.all_feature = self.all_feature[train_id_list]  #frame_id, object_id, object_type, position_x, position_y, position_z, object_length, pbject_width, pbject_height, heading
-                self.all_adjacency = self.all_adjacency[train_id_list]
-                self.all_mean_xy = self.all_mean_xy[train_id_list]
-            elif train_val_test.lower() == 'val':
-                self.all_feature = self.all_feature[val_id_list]
-                self.all_adjacency = self.all_adjacency[val_id_list]
-                self.all_mean_xy = self.all_mean_xy[val_id_list]
-            else:
-                self.all_feature = self.all_feature[self.test_id_list]
-                self.all_adjacency = self.all_adjacency[self.test_id_list]
-                self.all_mean_xy = self.all_mean_xy[self.test_id_list]
+            if self.train_val.lower() == 'train':
+                self.node_features = self.node_features[self.train_id_list]  #frame_id, object_id, object_type, position_x, position_y, position_z, object_length, pbject_width, pbject_height, heading
+                self.node_labels = self.node_labels[self.train_id_list]
+                self.output_mask = self.output_mask[self.train_id_list]
+                self.all_adjacency = self.all_adjacency[self.train_id_list]
+                self.all_mean_xy = self.all_mean_xy[self.train_id_list]
+                self.xy_dist = torch.tensor(self.xy_dist)[self.train_id_list]
+                self.last_vis_obj = torch.tensor(self.last_vis_obj)[self.train_id_list]
+            elif self.train_val.lower() == 'val':
+                self.node_features = self.node_features[self.val_id_list]
+                self.node_labels = self.node_labels[self.val_id_list]
+                self.output_mask = self.output_mask[self.val_id_list]
+                self.all_adjacency = self.all_adjacency[self.val_id_list]
+                self.all_mean_xy = self.all_mean_xy[self.val_id_list]
+                self.xy_dist = torch.tensor(self.xy_dist)[self.val_id_list]
+                self.last_vis_obj = torch.tensor(self.last_vis_obj)[self.val_id_list]
 
         #train_id_list = list(np.linspace(0, total_num-1, int(total_num*0.8)).astype(int))
         #val_id_list = list(set(list(range(total_num))) - set(train_id_list))  
@@ -138,17 +137,15 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
 
     def __len__(self):
-        return len(self.train_id_list)
+        return len(self.node_features)
 
     def __getitem__(self, idx):
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.last_vis_obj[idx],:self.last_vis_obj[idx]])).int()
         graph = dgl.remove_self_loop(graph)
-
-
-        graph = dgl.add_self_loop(graph)#.to('cuda')
+        graph = dgl.add_self_loop(graph)
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w']=torch.tensor(distances, dtype=torch.float32)#.to('cuda')
+        graph.edata['w']=F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
         #graph.ndata['x']=self.node_features[idx,:self.last_vis_obj[idx]] 
         feats = torch.tensor(self.node_features[idx,:self.last_vis_obj[idx]] , dtype=torch.float32)
         gt=torch.tensor(self.node_labels[idx,:self.last_vis_obj[idx]], dtype=torch.float32)  #graph.ndata['gt']
@@ -157,13 +154,12 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
         if self.test:
             return graph, feats, self.info[idx,:self.last_vis_obj[idx]],self.info[idx,:self.last_vis_obj[idx],2], self.all_mean_xy[idx], output_mask
         
-        
         return graph, output_mask, feats, gt 
 
 if __name__ == "__main__":
     history_frames=6
     future_frames=6
-    test_dataset = ApolloScape_DGLDataset(train_val='train', test=False)  #230
+    test_dataset = ApolloScape_DGLDataset(train_val='train', test=False) 
     test_dataloader=iter(DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
     
     while(1):

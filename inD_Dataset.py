@@ -16,16 +16,6 @@ import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
 
-def seed_torch(seed=42):
-	random.seed(seed)
-	os.environ['PYTHONHASHSEED'] = str(seed)
-	np.random.seed(seed)
-	torch.manual_seed(seed)
-	torch.cuda.manual_seed(seed)
-	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
-	torch.backends.cudnn.benchmark = False
-	torch.backends.cudnn.deterministic = True
-seed_torch(42)
 
 max_num_object = 30 #per frame
 total_feature_dimension = 12 #pos,heading,vel,recording_id,frame,id, l,w, class, mask
@@ -34,9 +24,6 @@ def collate_batch(samples):
     masks = torch.vstack(masks)
     feats = torch.vstack(feats)
     gt = torch.vstack(gt).float()
-
-    #masks = masks.view(masks.shape[0],-1)
-    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
     sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
     snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
     snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
@@ -59,45 +46,47 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         self.test = test
         self.classes = classes
 
-        self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/inD_2.5Hz8_12f_benchmark_train.pkl'   #inD_2.5Hz8_12f_benchmark_train.pkl'    #inD_2.5Hz_3s5s.pkl'  #el obs_frame sigue siendo el 7 , me vale para 8/8
+        self.raw_dir='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_train.pkl'   #inD_2.5Hz8_12f_benchmark_train.pkl'    #inD_2.5Hz_3s5s.pkl'  #el obs_frame sigue siendo el 7 , me vale para 8/8
         if self.train_val == 'test':  
-            self.raw_dir ='/home/sandra/PROGRAMAS/DBU_Graph/data/inD_2.5Hz8_12f_benchmark_test.pkl'    #rounD_2.5Hz8_8f.pkl'     
+            self.raw_dir ='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_test.pkl'    #rounD_2.5Hz8_8f.pkl'     
 
         self.process()        
 
     def load_data(self):
         with open(self.raw_dir, 'rb') as reader:
-            [all_feature_train, self.all_adjacency, self.all_mean_xy, self.all_visible_object_idx]= pickle.load(reader)
-        all_feature_train=np.transpose(all_feature_train, (0,3,2,1)) #(N,V,T,C)
-        self.all_feature_train=torch.from_numpy(all_feature_train[:,:,:self.total_frames,:]).type(torch.float32)
+            [all_feature, self.all_adjacency, self.all_mean_xy, self.all_visible_object_idx]= pickle.load(reader)
+        all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
+        self.all_feature=torch.from_numpy(all_feature[:,:,:self.total_frames,:]).type(torch.float32)
 
 
     def process(self):
         self.load_data()
         
-        total_num = len(self.all_feature_train)
+        total_num = len(self.all_feature)
         print(self.train_val, total_num)
         now_history_frame=self.history_frames-1
         feature_id = [0,1,3,4,2,10]  #pos vel heading obj
         info_feats_id = list(range(5,11))  #recording_id,frame,id, l,w, class
-        
-        if self.model_type == 'grip':
-            feature_id = [0,1,2,-1]
-        
-        self.object_type = self.all_feature_train[:,:,:,-2].int()  # torch Tensor NxVxT
+        self.object_type = self.all_feature[:,:,:,-2].int()  # torch Tensor NxVxT
         
         '''
-        mask_car=torch.zeros((total_num,self.all_feature_train.shape[1],self.total_frames))#.to('cuda') #NxVx10
+        mask_car=torch.zeros((total_num,self.all_feature.shape[1],self.total_frames))#.to('cuda') #NxVx10
         for i in range(total_num):
             mask_car_t=torch.Tensor([1 if j in self.classes else 0 for j in self.object_type[i,:,now_history_frame]])#.to('cuda')
             mask_car[i,:]=mask_car_t.view(mask_car.shape[1],1)+torch.zeros(self.total_frames)#.to('cuda') #120x12
         '''
-        self.node_features = self.all_feature_train[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
-        self.node_labels=self.all_feature_train[:,:,self.history_frames:,[0,1]]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
-        self.track_info = self.all_feature_train[:,:,:,info_feats_id]
-        self.output_mask= self.all_feature_train[:,:,:,-1] ###*mask_car  #mascara only_cars/peds visibles en 6º frame 
+        
+        #rescale_xy=torch.ones((1,1,1,2))
+        #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,0]))  #121  - test 119.3
+        #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,1]))   #77   -  test 79
+        #self.all_feature[:,:,:now_history_frame,:2] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
+
+        self.node_features = self.all_feature[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
+        self.node_labels=self.all_feature[:,:,self.history_frames:,[0,1]]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
+        self.track_info = self.all_feature[:,:,:,info_feats_id]
+        self.output_mask= self.all_feature[:,:,:,-1] ###*mask_car  #mascara only_cars/peds visibles en 6º frame 
         self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
-        self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature_train))]  #5010x70x70
+        self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70
         #self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_train))]
         
         id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
@@ -142,7 +131,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             self.all_adjacency = self.all_adjacency[self.val_id_list]
             self.all_mean_xy = self.all_mean_xy[self.val_id_list]
             self.output_mask = self.output_mask[self.val_id_list]
-            self.xy_dist = np.array(self.xy_dist)[self.val_id_list]
+            self.xy_dist = torch.tensor(self.xy_dist)[self.val_id_list]
             self.all_visible_object_idx = self.all_visible_object_idx[self.val_id_list]
 
     def __len__(self):
@@ -160,7 +149,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         #rel_vels = [1/(i) if i!=0 else 1 for i in rel_vels]          
         
         distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w'] = torch.tensor(distances, dtype=torch.float32)
+        graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
 
         if self.model_type == 'rgcn' or self.model_type == 'hetero':
             edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
@@ -205,25 +194,23 @@ class inD_DGLDataset(torch.utils.data.Dataset):
                     #g.edges[etype].data['norm'] = norm
                     graph.edata['norm'][np.where(np.array(rel_types)==i)] = norm
 
-
         if self.test:
             mean_xy = self.all_mean_xy[idx]
             track_info = self.track_info[idx,self.all_visible_object_idx[idx]]
             object_type = self.object_type[idx,self.all_visible_object_idx[idx],self.history_frames-1]
             return graph, output_mask, track_info, mean_xy, feats, gt, object_type
-
         else: 
             return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
-    history_frames=3
-    future_frames=3
-    train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4)) #12281
-    val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #3509
-    test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
-    print(len(train_dataset), len(val_dataset),len(test_dataset))
-    train_dataloader=iter(DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
-    val_dataloader=iter(DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch) )
+    history_frames=8
+    future_frames=12
+    #train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4)) #12281
+    val_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #3509
+    #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
+    #train_dataloader=iter(DataLoader(train_dataset, batch_size=5, shuffle=False, collate_fn=collate_batch) )
+    val_dataloader=iter(DataLoader(val_dataset, batch_size=5, shuffle=False, collate_fn=collate_batch) )
     while(1):
-        next(val_dataloader)
+        batched_graph, masks, snorm_n, snorm_e, feats, gt = next(val_dataloader)
+        print(feats.shape)
     

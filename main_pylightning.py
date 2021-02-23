@@ -300,7 +300,7 @@ class LitGNN(pl.LightningModule):
         last_loc = feats[:,-1:,:2].detach().clone()
         if dataset.lower() == 'apollo':
             #USE CHANGE IN POS AS INPUT
-            feats_vel,labels_vel = self.compute_change_pos(feats,labels)
+            feats_vel,labels = self.compute_change_pos(feats,labels)
             #Input pos + heading + vel
             feats = torch.cat([feats_vel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
 
@@ -317,7 +317,7 @@ class LitGNN(pl.LightningModule):
         
         
         if self.probabilistic:
-            total_loss = self.mdn_loss(pred, labels_vel[:,:self.future_frames])
+            total_loss = self.mdn_loss(pred, labels[:,:self.future_frames])
         else:
             pred=pred.view(labels.shape[0],self.future_frames,-1)
             
@@ -350,32 +350,67 @@ class LitGNN(pl.LightningModule):
             pred = self.model(batched_graph, feats[:,:,],e_w, rel_type,norm)
         else:
             pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
-        pred=pred.view(labels.shape[0],self.future_frames,-1)
-        
-        
-        # Compute predicted trajs.
-        if dataset.lower() == 'apollo':
-            for i in range(1,labels.shape[1]):
-                pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2 
-            pred += last_loc
+       
+       
+        if self.probabilistic:
+            ade={}
+            fde={}
+            for n in range(labels.shape[0]):
+                ade[n]=[]
+                fde[n]=[]            
+            #En test batch=1 secuencia con n agentes
+            #Para el most-likely coger el modo con pi mayor de los 3 y o bien coger muestra de la media 
+            for i in range(10): # @top10 Cojo 10 samples
+                preds=self.sample(pred)  #N,12
+                for n, pred_n in enumerate(preds): #itero por agente para calcular errores
+                    pred_n=pred_n.view(self.future_frames,-1)
+
+                    if dataset.lower() == 'apollo':
+                        for j in range(1,labels.shape[1]):
+                            pred_n[j,:] = torch.sum(pred_n[j-1:j+1,:],dim=-2) #6,2 
+                        pred_n += last_loc[n]
+
+                    _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred_n[:self.future_frames,:].unsqueeze(0), labels[n,:self.future_frames,:].unsqueeze(0), output_masks[n,self.history_frames:self.total_frames,:].unsqueeze(0))
+                    ade_n = torch.sum((x2y2_error**0.5).squeeze(0), dim=0) / torch.sum(overall_num.squeeze(0), dim=0)
+                    fde_n = (x2y2_error**0.5).squeeze(0)[-1] / overall_num.squeeze(0)[-1]
+                    if torch.isnan(fde_n):
+                        for j in range(self.future_frames-2,-1,-1):
+                            if overall_num.squeeze(0)[j] != 0:
+                                fde_n = (x2y2_error**0.5).squeeze(0)[j] / overall_num.squeeze(0)[j]
+                                break
+                    ade[n].append(ade_n) #B,1
+                    fde[n].append(fde_n) # B,1
+            min_ade=[]
+            min_fde=[]
+            for n in range(preds.shape[0]):  #me quedo con el menor error de los 10 para cada agente
+                min_ade.append(min(ade[n])) # N
+                min_fde.append(min(fde[n]))
+            self.log_dict({'test/ade': np.sum(np.array(min_ade))/(np.array(min_ade).shape[0]), "test/fde": np.sum(np.array(min_fde))/(np.array(min_fde).shape[0]) }, sync_dist=True) #
+        else:
+            pred=pred.view(pred.shape[0],labels.shape[1],-1)
+            # Compute predicted trajs.
+            if dataset.lower() == 'apollo':
+                for i in range(1,labels.shape[1]):
+                    pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2 
+                pred += last_loc
+                
+            _, overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+            long_err, lat_err, _ = self.compute_long_lat_error(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+            overall_loss_time = torch.sum((x2y2_error**0.5),dim=0) / torch.sum(overall_num, dim=0) #T
+            overall_loss_time[torch.isnan(overall_loss_time)]=0
+            overall_long_err = torch.sum(long_err.detach(),dim=0) / torch.sum(overall_num, dim=0) #T
+            overall_lat_err = torch.sum(lat_err.detach(),dim=0) / torch.sum(overall_num, dim=0) #T
+            overall_long_err[torch.isnan(overall_long_err)]=0
+            overall_lat_err[torch.isnan(overall_lat_err)]=0
+            self.overall_loss_time_list.append(overall_loss_time.detach().cpu().numpy())
+            self.overall_long_err_list.append(overall_long_err.detach().cpu().numpy())
+            self.overall_lat_err_list.append(overall_lat_err.detach().cpu().numpy())
             
-        _, overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
-        long_err, lat_err, _ = self.compute_long_lat_error(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
-        overall_loss_time = torch.sum((x2y2_error**0.5),dim=0) / torch.sum(overall_num, dim=0) #T
-        overall_loss_time[torch.isnan(overall_loss_time)]=0
-        overall_long_err = torch.sum(long_err.detach(),dim=0) / torch.sum(overall_num, dim=0) #T
-        overall_lat_err = torch.sum(lat_err.detach(),dim=0) / torch.sum(overall_num, dim=0) #T
-        overall_long_err[torch.isnan(overall_long_err)]=0
-        overall_lat_err[torch.isnan(overall_lat_err)]=0
-        self.overall_loss_time_list.append(overall_loss_time.detach().cpu().numpy())
-        self.overall_long_err_list.append(overall_long_err.detach().cpu().numpy())
-        self.overall_lat_err_list.append(overall_lat_err.detach().cpu().numpy())
-        
-        if self.future_frames == 8:
-            self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_2.8": overall_loss_time[6:7], "test/loss_3.2": overall_loss_time[-1:] })
-        elif self.future_frames == 12:
-            self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_3.2": overall_loss_time[7:8], "test/loss_4": overall_loss_time[9:10], "test/loss_4.8": overall_loss_time[-1:] }) #, sync_dist=True
-        
+            if self.future_frames == 8:
+                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_2.8": overall_loss_time[6:7], "test/loss_3.2": overall_loss_time[-1:] })
+            elif self.future_frames == 12:
+                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_3.2": overall_loss_time[7:8], "test/loss_4": overall_loss_time[9:10], "test/loss_4.8": overall_loss_time[-1:] }) #, sync_dist=True
+            
     def on_test_epoch_end(self):
         #wandb_logger.experiment.save(run.name + '.ckpt')
         overall_loss_time = np.array(self.overall_loss_time_list)
@@ -477,27 +512,27 @@ if __name__ == '__main__':
     
     if args.model == 'gat':
         bn = [False]
-        heads = [3]
+        heads = [2,1]
         att_ew = [True]
         bs = [512]  
-        lr=[1e-4, 5e-5]
+        lr=[1e-4, 5e-4]
         alfa = [0]
         beta = [0]
         delta = [0.]
         attn_drop = [0.4]
         dropout = [0.1]
-        hidden_dims = [512, 1256]
+        hidden_dims = [1512]
     else:
         heads = [1]
         attn_drop = [0.]
         att_ew = [False]
-        dropout = [0.1]
-        beta = [1,0]
-        delta = [0.1,0.01]
+        dropout = [0.1,0.25]
+        beta = [0]
+        delta = [0.1]
         bs = [512]
-        lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [5e-5,5e-4, 1e-4]
-        hidden_dims = [512, 1024] if args.model == 'rgcn' else [512,1256]
-        alfa = [3] if args.model == 'rgcn' else [3,0]
+        lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [5e-4, 1e-4]
+        hidden_dims = [512, 1024] if args.model == 'rgcn' else [512,1256,768]
+        alfa = [3] if args.model == 'rgcn' else [0]
         bn = [True]
 
 

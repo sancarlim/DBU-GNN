@@ -10,18 +10,8 @@ import numpy as np
 import dgl.function as fn
 from dgl.nn.pytorch.conv.gatconv import edge_softmax, Identity, expand_as_pair
 import matplotlib.pyplot as plt
-
+import math
 from torch.utils.data import DataLoader
-
-def seed_torch(seed=42):
-	os.environ['PYTHONHASHSEED'] = str(seed)
-	np.random.seed(seed)
-	torch.manual_seed(seed)
-	torch.cuda.manual_seed(seed)
-	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
-	torch.backends.cudnn.benchmark = False
-	torch.backends.cudnn.deterministic = True
-seed_torch()
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -145,32 +135,35 @@ class GATConv(nn.Module):
             else:
                 return rst
 
+
 class My_GATLayer(nn.Module):
     def __init__(self, in_feats, out_feats,  relu=True, feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
         super(My_GATLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear_func = nn.Linear(in_feats, out_feats, bias=False)
         self.att_ew=att_ew
-        self.res_weight=res_weight
-        self.res_connection=res_connection
         self.relu = relu
         if att_ew:
             self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
         else:
             self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
-
-        self.feat_drop_l = nn.Dropout(feat_drop)
-        self.attn_drop_l = nn.Dropout(attn_drop)
-        
+        self.feat_drop_l = nn.Dropout(feat_drop, inplace=False)
+        self.attn_drop_l = nn.Dropout(attn_drop, inplace=False)   
+        self.res_con = res_connection
         self.reset_parameters()
-    
-    
+      
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
         gain = nn.init.calculate_gain('relu')
+        
+        nn.init.kaiming_normal_(self.linear_self.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.linear_func.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.attention_func.weight, nonlinearity='leaky_relu')
+        '''
         nn.init.xavier_normal_(self.linear_self.weight, gain=gain)
         nn.init.xavier_normal_(self.linear_func.weight, gain=gain)
-        nn.init.xavier_normal_(self.attention_func.weight, gain=gain)
+        nn.init.xavier_normal_(self.attention_func.weight, gain=nn.init.calculate_gain('leaky_relu',0.01))
+        '''
     
     def edge_attention(self, edges):
         concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=-1) #(n_edg,hid)||(n_edg,hid) -> (n_edg,2*hid) 
@@ -180,32 +173,21 @@ class My_GATLayer(nn.Module):
         
         src_e = self.attention_func(concat_z)  #(n_edg, 1) att logit
         src_e = F.leaky_relu(src_e)
-
         return {'e': src_e}
     
     def message_func(self, edges):
         return {'z': edges.src['z'], 'e':edges.data['e']}
         
     def reduce_func(self, nodes):
-        h_s = nodes.data['h_s']
-        
+        h_s = nodes.data['h_s']      
         #Attention score
         a = self.attn_drop_l(   F.softmax(nodes.mailbox['e'], dim=1)  )  #attention score between nodes i and j
-        
-        #h = torch.sum(a * nodes.mailbox['z'], dim=1) 
-        if self.res_weight:
-            h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1) #OP A
-        else:
-            h = torch.sum(a * nodes.mailbox['z'], dim=1)
-        
+        h = h_s + torch.sum(a * nodes.mailbox['z'], dim=1)
         return {'h': h}
                                
     def forward(self, g, h,snorm_n):
         with g.local_scope():
-
-            #feat = h.detach().cpu().numpy().astype('uint8')
-            #feat=(feat*255/np.max(feat))
-            h_in = h
+            h_in = h.clone()
             g.ndata['h']  = h 
             #feat dropout
             h=self.feat_drop_l(h)
@@ -213,15 +195,13 @@ class My_GATLayer(nn.Module):
             g.ndata['z'] = self.linear_func(h) 
             g.apply_edges(self.edge_attention)
             g.update_all(self.message_func, self.reduce_func)
-            #M = g.ndata['h'].detach().cpu().numpy().astype('uint8')-feat
-            #M=(M*255/np.max(M))
             h =  g.ndata['h'] #+g.ndata['h_s'] 
             #h = h * snorm_n # normalize activation w.r.t. graph node size
             if self.relu:
                 h = torch.relu(h) # non-linear activation
-            if self.res_connection:
-                h = h_in + h # residual connectio           
-            return h #graph.ndata.pop('h')
+            if self.res_con:
+                h = h_in + h # residual connection           
+            return h #graph.ndata.pop('h') - another option to g.local_scope()
 
 
 class MultiHeadGATLayer(nn.Module):
@@ -254,52 +234,41 @@ class My_GAT(nn.Module):
             self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
             self.linear1 = nn.Linear(hidden_dim, output_dim)          
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, merge='average', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
-            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads,hidden_dim*heads, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, merge='cat', res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
-            
-        #self.linear2 = nn.Linear( int(hidden_dim/2),  output_dim)
-        
+
         if dropout:
-            self.dropout_l = nn.Dropout(dropout)
+            self.dropout_l = nn.Dropout(dropout, inplace=False)
         else:
             self.dropout_l = nn.Dropout(0.)
-
         self.reset_parameters()
 
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
         gain = nn.init.calculate_gain('relu')
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.linear1.weight, gain=gain)
-        nn.init.xavier_normal_(self.embedding_e.weight)
-        
+        nn.init.xavier_normal_(self.linear1.weight)  #Aquí ya no hay no linearlidad
+        nn.init.xavier_normal_(self.embedding_e.weight)       
         if self.heads == 3:
-            nn.init.xavier_normal_(self.embedding_e2.weight, gain=gain)
+            nn.init.xavier_normal_(self.embedding_e2.weight)
     
-        
     def forward(self, g, feats,e_w,snorm_n,snorm_e):
-        
-
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         feats = feats.contiguous().view(feats.shape[0],-1)
-
         # input embedding
         h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
         e = self.embedding_e(e_w)
         g.edata['w']=e
-
         # gat layers
-        h = self.gat_1(g, h,snorm_n) #self.gat_1(g, h).flatten(1) #
+        h = self.gat_1(g, h,snorm_n) 
         if self.heads > 1:
             e = self.embedding_e2(e_w)
             g.edata['w']=e
-        h = self.gat_2(g, h, snorm_n)  #.flatten(1)  #BN Y RELU DENTRO DE LA GAT_LAYER
+        h = self.gat_2(g, h, snorm_n)  #BN Y RELU DENTRO DE LA GAT_LAYER
         h = self.dropout_l(h)
-        #Last linear layer
-        y = self.linear1(h) 
-        #y = self.linear2(torch.relu(y))
+        y = self.linear1(h)
         return y
     
 if __name__ == '__main__':
