@@ -13,129 +13,6 @@ import matplotlib.pyplot as plt
 import math
 from torch.utils.data import DataLoader
 
-def collate_batch(samples):
-    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = torch.vstack(masks)
-    feats = torch.vstack(feats)
-    gt = torch.vstack(gt).float()
-
-    #masks = masks.view(masks.shape[0],-1)
-    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
-    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
-    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
-    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
-    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
-    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
-    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
-    batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
-
-
-
-class GATConv(nn.Module):
-    def __init__(self,
-                 in_feats,
-                 out_feats,
-                 num_heads,
-                 feat_drop=0.,
-                 attn_drop=0.,
-                 negative_slope=0.2,
-                 residual=False,
-                 activation=None):
-        super(GATConv, self).__init__()
-        self._num_heads = num_heads
-        self._in_src_feats, self._in_dst_feats = expand_as_pair(in_feats)
-        self._out_feats = out_feats
-        self.fc = nn.Linear(self._in_src_feats, out_feats * num_heads, bias=False)
-        self.attn_l = nn.Parameter(th.FloatTensor(size=(1, num_heads, out_feats)))
-        self.attn_r = nn.Parameter(th.FloatTensor(size=(1, num_heads, out_feats)))
-        self.feat_drop = nn.Dropout(feat_drop)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.leaky_relu = nn.LeakyReLU(negative_slope)
-        if residual:
-            if self._in_dst_feats != out_feats:
-                self.res_fc = nn.Linear(self._in_dst_feats, num_heads * out_feats, bias=False)
-            else:
-                self.res_fc = Identity()
-        else:
-            self.register_buffer('res_fc', None)
-        self.reset_parameters()
-        self.activation = activation
-
-    def reset_parameters(self):
-        """
-        Description
-        -----------
-        Reinitialize learnable parameters.
-        Note
-        ----
-        The fc weights :math:`W^{(l)}` are initialized using Glorot uniform initialization.
-        The attention weights are using xavier initialization method.
-        """
-        gain = nn.init.calculate_gain('relu')
-        if hasattr(self, 'fc'):
-            nn.init.xavier_normal_(self.fc.weight, gain=gain)
-        else:
-            nn.init.xavier_normal_(self.fc_src.weight, gain=gain)
-            nn.init.xavier_normal_(self.fc_dst.weight, gain=gain)
-        nn.init.xavier_normal_(self.attn_l, gain=gain)
-        nn.init.xavier_normal_(self.attn_r, gain=gain)
-        if isinstance(self.res_fc, nn.Linear):
-            nn.init.xavier_normal_(self.res_fc.weight, gain=gain)
-
-    def forward(self, graph, feat, get_attention=False):
-        with graph.local_scope():
-            if (graph.in_degrees() == 0).any():
-                raise DGLError('There are 0-in-degree nodes in the graph, '
-                                'output for those nodes will be invalid. '
-                                'This is harmful for some applications, '
-                                'causing silent performance regression. '
-                                'Adding self-loop on the input graph by '
-                                'calling `g = dgl.add_self_loop(g)` will resolve '
-                                'the issue. Setting ``allow_zero_in_degree`` '
-                                'to be `True` when constructing this module will '
-                                'suppress the check and let the code run.')
-
-            
-            h_src = h_dst = self.feat_drop(feat)
-            feat_src = feat_dst = self.fc(h_src).view(-1, self._num_heads, self._out_feats)
-
-            # NOTE: GAT paper uses "first concatenation then linear projection"
-            # to compute attention scores, while ours is "first projection then
-            # addition", the two approaches are mathematically equivalent:
-            # We decompose the weight vector a mentioned in the paper into
-            # [a_l || a_r], then a^T [Wh_i || Wh_j] = a_l Wh_i + a_r Wh_j
-            # Our implementation is much efficient because we do not need to
-            # save [Wh_i || Wh_j] on edges, which is not memory-efficient. Plus,
-            # addition could be optimized with DGL's built-in function u_add_v,
-            # which further speeds up computation and saves memory footprint.
-            el = (feat_src * self.attn_l).sum(dim=-1).unsqueeze(-1)
-            er = (feat_dst * self.attn_r).sum(dim=-1).unsqueeze(-1)
-            graph.srcdata.update({'ft': feat_src, 'el': el})
-            graph.dstdata.update({'er': er})
-            # compute edge attention, el and er are a_l Wh_i and a_r Wh_j respectively.
-            graph.apply_edges(fn.u_add_v('el', 'er', 'e'))
-            e = self.leaky_relu(graph.edata.pop('e'))
-            # compute softmax
-            graph.edata['a'] = self.attn_drop(edge_softmax(graph, e))
-            # message passing
-            graph.update_all(fn.u_mul_e('ft', 'a', 'm'),
-                             fn.sum('m', 'ft'))
-            rst = graph.dstdata['ft']
-            # residual
-            if self.res_fc is not None:
-                resval = self.res_fc(h_dst).view(h_dst.shape[0], -1, self._out_feats)
-                rst = rst + resval
-            # activation
-            if self.activation:
-                rst = self.activation(rst)
-
-            if get_attention:
-                return rst, graph.edata['a']
-            else:
-                return rst
-
-
 
 class MDN(nn.Module):
     """A mixture density network layer
@@ -166,10 +43,9 @@ class MDN(nn.Module):
 
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        gain = nn.init.calculate_gain('relu')
-        nn.init.kaiming_normal_(self.sigma.weight)
-        nn.init.kaiming_normal_(self.mu.weight)
-        nn.init.kaiming_normal_(self.pi.weight)
+        nn.init.normal_(self.sigma.weight, 0, sqrt(1. / self.sigma.in_features))
+        nn.init.xavier_normal_(self.mu.weight)
+        nn.init.xavier_normal_(self.pi.weight)
 
     def forward(self, minibatch):
         pi = F.softmax(self.pi(minibatch), dim=1)
@@ -288,7 +164,7 @@ class SCOUT_MDN(nn.Module):
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.linear1.weight)  #Aquí ya no hay no linearlidad
+        nn.init.xavier_normal_(self.linear1.weight, nn.init.calculate_gain('tanh'))  
         nn.init.xavier_normal_(self.embedding_e.weight)       
         if self.heads == 3:
             nn.init.xavier_normal_(self.embedding_e2.weight)

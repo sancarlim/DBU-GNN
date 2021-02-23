@@ -286,7 +286,7 @@ class My_GAT(nn.Module):
         
 
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
-        feats = feats.view(feats.shape[0],-1)
+        feats = feats.contiguous().view(feats.shape[0],-1)
 
         # input embedding
         h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
