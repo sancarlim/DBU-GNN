@@ -352,7 +352,7 @@ class LitGNN(pl.LightningModule):
                     print('stop')
                 ade.append(ade_s) #S samples
                 fde.append(fde_s)
-        
+            print('\n',min(ade).item(),'\n', min(fde).item())
             self.log_dict({'test/ade': min(ade), "test/fde": min(fde)}) #, sync_dist=True
         
         else:
@@ -391,40 +391,39 @@ class LitGNN(pl.LightningModule):
 
         
         if self.probabilistic:
-            ade={}
-            fde={}
-            for n in range(labels.shape[0]):
-                ade[n]=[]
-                fde[n]=[]            
+            ade = []
+            fde = []         
             #En test batch=1 secuencia con n agentes
             #Para el most-likely coger el modo con pi mayor de los 3 y o bien coger muestra de la media 
-            for i in range(10): # @top10 Cojo 10 samples
+            for i in range(15): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
                 preds=self.sample(pred)  #N,12
-                for n, pred_n in enumerate(preds): #itero por agente para calcular errores
-                    pred_n=pred_n.view(self.future_frames,-1)
+                preds=preds.view(preds.shape[0],self.future_frames,-1)
+                if dataset.lower() == 'apollo':
+                    for j in range(1,labels.shape[1]):
+                        preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
+                    preds += last_loc
 
-                    if dataset.lower() == 'apollo':
-                        for j in range(1,labels.shape[1]):
-                            pred_n[j,:] = torch.sum(pred_n[j-1:j+1,:],dim=-2) #6,2 
-                        pred_n += last_loc[n]
-
-                    _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred_n[:self.future_frames,:].unsqueeze(0), labels[n,:self.future_frames,:].unsqueeze(0), output_masks[n,self.history_frames:self.total_frames,:].unsqueeze(0))
-                    ade_n = torch.sum((x2y2_error**0.5).squeeze(0), dim=0) / torch.sum(overall_num.squeeze(0), dim=0)
-                    fde_n = (x2y2_error**0.5).squeeze(0)[-1] / overall_num.squeeze(0)[-1]
-                    if torch.isnan(fde_n):
-                        for j in range(self.future_frames-2,-1,-1):
-                            if overall_num.squeeze(0)[j] != 0:
-                                fde_n = (x2y2_error**0.5).squeeze(0)[j] / overall_num.squeeze(0)[j]
+                _ , overall_num, x2y2_error = self.compute_RMSE_batch(preds[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+                ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
+                ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
+                fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
+                if torch.isnan(fde_s):  #visible pero no tiene datos para los siguientes 6 frames
+                    print('stop')
+                    fde_s[np.isnan(fde_s)]=0
+                    ade_ts[np.isnan(ade_ts)]=0
+                    for j in range(self.future_frames-2,-1,-1):
+                        if ade_ts[j] != 0:
+                                fde_s =  torch.sum((x2y2_error**0.5), dim=0)[j] / torch.sum(overall_num, dim=0)[j]  #compute FDE with the last frame with data
+                                ade_s = torch.sum(ade_ts)/ (j+1) #compute ADE dividing by number of frames with data
                                 break
-                    
-                    ade[n].append(ade_n) #B,1
-                    fde[n].append(fde_n) # B,1
-            min_ade=[]
-            min_fde=[]
-            for n in range(preds.shape[0]):  #me quedo con el menor error de los 10 para cada agente
-                min_ade.append(min(ade[n])) # N
-                min_fde.append(min(fde[n]))
-            self.log_dict({'test/ade': np.sum(np.array(min_ade))/(np.array(min_ade).shape[0]), "test/fde": np.sum(np.array(min_fde))/(np.array(min_fde).shape[0]) }) #, sync_dist=True
+                ade.append(ade_s) #S samples
+                fde.append(fde_s)
+            with open('/home/sandra/PROGRAMAS/DBU_Graph/Apollo_MDN_test_result.txt', 'a') as f:
+                print(min(ade).item(), min(fde).item(), sep=' ', end='\n',file=f)
+         
+           
+            self.log_dict({'test/ade': min(ade), "test/fde": min(fde)}) #, sync_dist=True
+        
         else:
             pred=pred.view(pred.shape[0],labels.shape[1],-1)
             # Compute predicted trajs.
@@ -459,27 +458,28 @@ class LitGNN(pl.LightningModule):
             
     def on_test_epoch_end(self):
         #wandb_logger.experiment.save(run.name + '.ckpt')
-        overall_loss_time = np.array(self.overall_loss_time_list)
-        avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        var = [sum((overall_loss_time[:,i]-avg[i])**2)/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
-        print('Loss variance: ' , var)
+        if not self.probabilistic:
+            overall_loss_time = np.array(self.overall_loss_time_list)
+            avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
+            var = [sum((overall_loss_time[:,i]-avg[i])**2)/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
+            print('Loss variance: ' , var)
 
-        overall_long_err = np.array(self.overall_long_err_list)
-        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
-        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
-        
-        overall_lat_err = np.array(self.overall_lat_err_list)
-        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-        print('\n'.join('Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-        print('\n'.join('Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+            overall_long_err = np.array(self.overall_long_err_list)
+            avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+            var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(len(overall_long_err[0]))]
+            
+            overall_lat_err = np.array(self.overall_lat_err_list)
+            avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
+            var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
+            print('\n'.join('Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+            print('\n'.join('Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
-        self.log_dict({ "test/var_s1": torch.tensor(var[0]), "test/var_s2": torch.tensor(var[1]),"test/var_s3": torch.tensor(var[2])})
-        if self.future_frames == 5:
-            self.log_dict({"var_s4": torch.tensor(var[3]), "var_s5": torch.tensor(var[-1])})
-        elif self.future_frames == 12:
-            self.log_dict({"test/var_2": torch.tensor(var[4:5]), "test/var_2.8": torch.tensor(var[6:7]), "test/var_4": torch.tensor(var[9:10]), "test/var_4.8": torch.tensor(var[-1:]) }) #, sync_dist=True
-        
+            self.log_dict({ "test/var_s1": torch.tensor(var[0]), "test/var_s2": torch.tensor(var[1]),"test/var_s3": torch.tensor(var[2])})
+            if self.future_frames == 5:
+                self.log_dict({"var_s4": torch.tensor(var[3]), "var_s5": torch.tensor(var[-1])})
+            elif self.future_frames == 12:
+                self.log_dict({"test/var_2": torch.tensor(var[4:5]), "test/var_2.8": torch.tensor(var[6:7]), "test/var_4": torch.tensor(var[9:10]), "test/var_4.8": torch.tensor(var[-1:]) }) #, sync_dist=True
+            
 
         
         
@@ -511,28 +511,32 @@ def sweep_train():
     elif config.model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=config.hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=config.embedding, bn=config.bn, dropout=config.dropout)
     
-    path = '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/firm-sweep-3/epoch=59-step=3779.ckpt'#DGX/APOLLO/helpful-sweep-17/epoch=48-step=3282.ckpt'
+    path = '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/quiet-sweep-1/epoch=164-step=10394.ckpt'#DGX/APOLLO/helpful-sweep-17/epoch=48-step=3282.ckpt'
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
     LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=path,model=LitGNN_sys.model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
 
 
     #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
-
+    ########################### TEST APOLLO MDN ############################
+    print('############ TEST APOLLO ##############')
+    trainer = pl.Trainer(gpus=0, profiler=True)
+    trainer.test(LitGNN_sys)
+    #########################################################
     
-    checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='./logs/'+run.name, save_top_k=1)
+    checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='./logs/'+run.name, save_top_k=0)
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=6)
-    trainer = pl.Trainer(resume_from_checkpoint=path ,weights_summary='full', gpus=1,  logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # precision=16,precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+    trainer = pl.Trainer(resume_from_checkpoint=path ,weights_summary='full', gpus=0,  logger=wandb_logger,  profiler=True, callbacks=[early_stop_callback,checkpoint_callback] ) # precision=16,precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     #resume_from_checkpoint=path, 
     
     print('Best lr: ', LitGNN_sys.lr)
-    print("############### TRAIN ####################")
-    trainer.fit(LitGNN_sys)
-    print('save:',trainer.checkpoint_callback.best_model_path)
+    #print("############### TRAIN ####################")
+    #trainer.fit(LitGNN_sys)
+    #print('save:',trainer.checkpoint_callback.best_model_path)
     #wandb.save(trainer.checkpoint_callback.best_model_path)
     
     print("############### TEST ####################")
     if dataset.lower() != 'apollo':
-        trainer.test(ckpt_path='best')
+        trainer.test()
 
 
 
@@ -545,7 +549,7 @@ if __name__ == '__main__':
     if dataset.lower() == 'apollo':
         train_dataset = ApolloScape_DGLDataset(train_val='train',  test=False) #3447
         val_dataset = ApolloScape_DGLDataset(train_val='val', test=False)  #919
-        #test_dataset = ApolloScape_DGLDataset(train_val='test', test=False)  #230
+        test_dataset = ApolloScape_DGLDataset(train_val='val', test=False)  #230
         print(len(train_dataset), len(val_dataset))
         input_dim = [5] 
     elif dataset.lower() == 'ind':
@@ -580,7 +584,7 @@ if __name__ == '__main__':
         beta = [0]
         delta = [0]
         bs = [512]
-        lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [1e-5]
+        lr = [1e-4, 3e-4, 3e-5] if args.model == 'rgcn' else [1e-6]
         hidden_dims = [512, 1024] if args.model == 'rgcn' else [512]
         alfa = [0,1,2,4] if args.model == 'rgcn' else [0]
         bn = [True]
@@ -700,11 +704,11 @@ if __name__ == '__main__':
             "input_dim": 5,
             "history_frames":6,
             "future_frames":6,
-            "learning_rate":1e-5,
-            "batch_size": 512,
+            "learning_rate":1e-6,
+            "batch_size": 1,
             "hidden_dims": 512,
             "model_type": args.model,
-            "dropout": 0.,
+            "dropout": 0.1,
             "alfa": 0,
             "beta": 0,
             "delta": 0.,

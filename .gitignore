@@ -150,10 +150,13 @@ wandb
 
 #Apollo_challenge
 /Apollo_Challenge/
-test_Apollo.py
 Graph_InitialTests.ipynb
 *.sh
 *.yaml
 *.json
 *.checkpoints
 Graph_InitialTests.ipynb
+trained_models/log_test.txt
+prediction_result.txt
+main_grip.py
+main_grip.py
