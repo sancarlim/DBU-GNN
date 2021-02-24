@@ -45,7 +45,7 @@ class MDN(nn.Module):
 
     def forward(self, minibatch):
         pi = F.softmax(self.pi(minibatch), dim=1)
-        sigma = F.elu(self.sigma(minibatch)) + 1   #torch.exp(self.sigma(minibatch) max 12.5 min 0.8
+        sigma = F.elu(self.sigma(minibatch)) + 1 + 1e-5   #torch.exp(self.sigma(minibatch) max 12.5 min 0.8
         sigma = sigma.view(-1, self.num_gaussians, self.out_features)
         mu = self.mu(minibatch)
         mu = mu.view(-1, self.num_gaussians, self.out_features)

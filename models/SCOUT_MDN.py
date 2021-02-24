@@ -47,11 +47,11 @@ class MDN(nn.Module):
         nn.init.xavier_normal_(self.mu.weight)
         nn.init.xavier_normal_(self.pi.weight)
 
-    def forward(self, minibatch):
-        pi = F.softmax(self.pi(minibatch), dim=1)
-        sigma = F.elu(self.sigma(minibatch)) + 1   #torch.exp(self.sigma(minibatch) max 12.5 min 0.8
+    def forward(self, h):
+        pi = F.softmax(self.pi(h), dim=1)
+        sigma = F.elu(self.sigma(h)) + 1  + 1e-5 #torch.exp(self.sigma(h) 
         sigma = sigma.view(-1, self.num_gaussians, self.out_features)
-        mu = self.mu(minibatch)
+        mu = self.mu(h)
         mu = mu.view(-1, self.num_gaussians, self.out_features)
         return pi, sigma, mu
 
