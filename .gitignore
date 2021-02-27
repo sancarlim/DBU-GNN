@@ -156,8 +156,6 @@ Graph_InitialTests.ipynb
 /data
 *.pth
 *.sh
-*.yml
-*.yaml
 *workspace
 *.json
 *.txt
@@ -168,3 +166,6 @@ ApolloScape_process.py
 models/GCN.py
 models/Gated_GCN.py
 models/GCN.py
+DBU_Graph.yml
+DBU_Graph_env.yaml
+core

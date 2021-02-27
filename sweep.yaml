@@ -1,0 +1,78 @@
+program: main_pylightning.py 
+name: APOLLO GATED_MDN
+method: random
+metric:
+    name: Sweep/val_loss
+    goal: minimize
+early_terminate:
+    type: hyperband
+    min_iter: 3
+### GPUS !!!
+parameters:
+            gpus:
+                values: [0]
+            history_frames:
+                values: [6]
+            future_frames:
+                values: [6]
+            dataset:
+                values: ['apollo']            
+            probabilistic:
+                values: [True]
+            learning_rate:
+                #"distribution": 'log_uniform',
+                #"max": -2,
+                #"min": -6
+                values: [5e-5, 1e-4, 1e-5]
+            batch_size: 
+                #"distribution": 'int_uniform',
+                #"max": 512,
+                #"min": 64,
+                values: [512]
+            hidden_dims:
+                #"distribution": 'int_uniform',
+                #"max": 1024,
+                #"min": 512
+                values: [512,1256,1024]
+            model_type: 
+                values: ['gated_mdn']
+            dropout:
+                #"distribution": 'uniform',
+                #"min": 0.01,
+                #"max": 0.5
+                values: [0.1,0.5]
+            alfa: 
+                #"distribution": 'uniform',
+                #"min": 1,
+                #"max": 4
+                values: [0.]
+            beta:
+                #"distribution": 'uniform',
+                #"min": 0,
+                #"max": 1
+                values: [0.]
+            delta:
+                #"distribution": 'uniform',
+                #"min": 0.01,
+                #"max": 10
+                values: [0.]
+            feat_drop:
+                values: [0.]
+            attn_drop:
+                values: [0.4]
+            bn:
+                #"distribution": 'categorical',
+                values: [True]
+            wd:
+                #"distribution": 'log_uniform',
+                #"max": -1,
+                #"min": -3
+                values: [0.01,0.1]
+            heads: 
+                values: [2]
+            att_ew:
+                values: [True]          
+            gcn_drop:
+                values: [0.]
+            gcn_bn:
+                values: [True]
