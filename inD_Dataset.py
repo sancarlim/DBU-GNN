@@ -36,7 +36,7 @@ def collate_batch(samples):
 
 class inD_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None, classes=(1,2)):
+    def __init__(self, train_val, history_frames, future_frames, test=False, model_type='gat', data_path=None, classes=(1,2), rel_types=False):
         
         self.train_val=train_val
         self.history_frames = history_frames
@@ -45,10 +45,11 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         self.model_type = model_type
         self.test = test
         self.classes = classes
+        self.types = rel_types
 
-        self.raw_dir='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_train.pkl'   #inD_2.5Hz8_12f_benchmark_train.pkl'    #inD_2.5Hz_3s5s.pkl'  #el obs_frame sigue siendo el 7 , me vale para 8/8
+        self.raw_dir='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_train.pkl' #inD_2.5Hz8_12f_benchmark_train.pkl'   #inD_2.5Hz_3s5s.pkl'  #el obs_frame sigue siendo el 7 , me vale para 8/8
         if self.train_val == 'test':  
-            self.raw_dir ='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_test.pkl'    #rounD_2.5Hz8_8f.pkl'     
+            self.raw_dir ='/media/14TBDISK/sandra/inD_processed/inD_2.5Hz8_12f_benchmark_test.pkl'   #inD_2.5Hz8_12f_benchmark_test.pkl'    #rounD_2.5Hz8_8f.pkl'     
 
         self.process()        
 
@@ -65,9 +66,11 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         total_num = len(self.all_feature)
         print(self.train_val, total_num)
         now_history_frame=self.history_frames-1
-        feature_id = [0,1,3,4,2,10]  #pos vel heading obj
+        feature_id = [0,1,2,3,4,10]  #pos vel heading obj
         info_feats_id = list(range(5,11))  #recording_id,frame,id, l,w, class
         self.object_type = self.all_feature[:,:,:,-2].int()  # torch Tensor NxVxT
+        self.object_type[self.object_type==3] = 1 # truck_bus=1 (car)
+        self.object_type[self.object_type==4] = 3 # bic = 3
         
         '''
         mask_car=torch.zeros((total_num,self.all_feature.shape[1],self.total_frames))#.to('cuda') #NxVx10
@@ -87,7 +90,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         self.output_mask= self.all_feature[:,:,:,-1] ###*mask_car  #mascara only_cars/peds visibles en 6º frame 
         self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
         self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70
-        #self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,-2:].cpu(), self.node_features[i][:,now_history_frame,-2:].cpu()) for i in range(len(self.all_feature_train))]
+        self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,3:5].cpu(), self.node_features[i][:,now_history_frame,3:5].cpu()) for i in range(len(self.all_feature))]
         
         id_list = list(set(list(range(total_num))))# - set(zero_indeces_list))
         total_valid_num = len(id_list)
@@ -98,6 +101,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         #self.train_id_list,self.val_id_list = id_list[:round(total_valid_num*0.8)],id_list[round(total_valid_num*0.8):]
         
         #BENCHMARK        
+        
         if self.train_val == 'test':
             self.test_id_list = id_list
         else:
@@ -122,17 +126,31 @@ class inD_DGLDataset(torch.utils.data.Dataset):
             self.node_labels = self.node_labels[self.train_id_list]
             self.all_adjacency = self.all_adjacency[self.train_id_list]
             self.all_mean_xy = self.all_mean_xy[self.train_id_list]
+            self.object_type =self.object_type[self.train_id_list]
             self.output_mask = self.output_mask[self.train_id_list]
-            self.xy_dist = torch.tensor(self.xy_dist)[self.train_id_list]
+            self.xy_dist = np.array(self.xy_dist)[self.train_id_list]
+            self.vel_l2 = np.array(self.vel_l2)[self.train_id_list]
             self.all_visible_object_idx = self.all_visible_object_idx[self.train_id_list]
         elif self.train_val.lower() == 'val':
             self.node_features = self.node_features[self.val_id_list]
             self.node_labels = self.node_labels[self.val_id_list]
             self.all_adjacency = self.all_adjacency[self.val_id_list]
             self.all_mean_xy = self.all_mean_xy[self.val_id_list]
+            self.object_type =self.object_type[self.val_id_list]
             self.output_mask = self.output_mask[self.val_id_list]
-            self.xy_dist = torch.tensor(self.xy_dist)[self.val_id_list]
+            self.xy_dist = np.array(self.xy_dist)[self.val_id_list]
+            self.vel_l2 = np.array(self.vel_l2)[self.val_id_list]
             self.all_visible_object_idx = self.all_visible_object_idx[self.val_id_list]
+        else:
+            self.node_features = self.node_features[self.test_id_list]
+            self.node_labels = self.node_labels[self.test_id_list]
+            self.all_adjacency = self.all_adjacency[self.test_id_list]
+            self.object_type =self.object_type[self.test_id_list]
+            self.all_mean_xy = self.all_mean_xy[self.test_id_list]
+            self.output_mask = self.output_mask[self.test_id_list]
+            self.xy_dist = np.array(self.xy_dist)[self.test_id_list]
+            self.vel_l2 = np.array(self.vel_l2)[self.test_id_list]
+            self.all_visible_object_idx = self.all_visible_object_idx[self.test_id_list]
 
     def __len__(self):
             return len(self.node_features)
@@ -140,16 +158,24 @@ class inD_DGLDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:len(self.all_visible_object_idx[idx]),:len(self.all_visible_object_idx[idx])])).int()
         graph = dgl.remove_self_loop(graph)
+        edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
+        rel_types = [(self.object_type[idx][u,self.history_frames-1]* self.object_type[idx][v,self.history_frames-1])for u,v in edges_uvs]
         graph = dgl.add_self_loop(graph)
-        feats = self.node_features[idx,self.all_visible_object_idx[idx]] #graph.ndata['x']
-        gt = self.node_labels[idx,self.all_visible_object_idx[idx]]  #graph.ndata['gt']
+        rel_types.extend(torch.zeros_like(rel_types[0], dtype=torch.float32) for i in range(graph.num_nodes()))
+        feats = self.node_features[idx,self.all_visible_object_idx[idx]] #graph.ndata['x']  (N,Thist,6) - N ~ agents in seq idx = nodes in graph idx
+        gt = self.node_labels[idx,self.all_visible_object_idx[idx]]  #graph.ndata['gt']   (N,Tpred,2)
         output_mask = self.output_mask[idx,self.all_visible_object_idx[idx]]
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
-        #rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
-        #rel_vels = [1/(i) if i!=0 else 1 for i in rel_vels]          
-        
+        rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
-        graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
+        if self.types:
+            rel_vels =  F.softmax(torch.tensor(rel_vels, dtype=torch.float32), dim=0)
+            distances = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
+            graph.edata['w'] = torch.tensor([[distances[i],rel_vels[i],rel_types[i]] for i in range(len(rel_types))], dtype=torch.float32)
+        else:
+            graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
+
+
 
         if self.model_type == 'rgcn' or self.model_type == 'hetero':
             edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
@@ -206,7 +232,7 @@ if __name__ == "__main__":
     history_frames=8
     future_frames=12
     #train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4)) #12281
-    val_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #3509
+    val_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type='rgcn', classes=(1,2,3,4))  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
     #train_dataloader=iter(DataLoader(train_dataset, batch_size=5, shuffle=False, collate_fn=collate_batch) )
     val_dataloader=iter(DataLoader(val_dataset, batch_size=5, shuffle=False, collate_fn=collate_batch) )

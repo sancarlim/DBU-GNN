@@ -132,10 +132,13 @@ class GatedGCN_layer(nn.Module):
 
 class Gated_MDN(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, bn):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, bn, ew_type=False):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.embedding_e = nn.Linear(1, hidden_dim)
+        if ew_type:
+            self.embedding_e = nn.Linear(3, hidden_dim) if  output_dim > 12 else  nn.Linear(2, hidden_dim) # ind -> 3 rel_pos+rel_vel+type / apollo rel_pos+type
+        else:
+            self.embedding_e = nn.Linear(1, hidden_dim)
         self.GatedGCN1 = GatedGCN_layer(hidden_dim, hidden_dim)
         self.GatedGCN2 = GatedGCN_layer(hidden_dim, hidden_dim)
         self.linear1 = nn.Linear(hidden_dim, hidden_dim//2)
@@ -158,10 +161,8 @@ class Gated_MDN(nn.Module):
         nn.init.xavier_normal_(self.embedding_e.weight)
 
     def forward(self, g, inputs, e, snorm_n, snorm_e):
-
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         inputs = inputs.contiguous().view(inputs.shape[0],-1)
-
         # input embedding
         h = self.embedding_h(inputs)
         e = self.embedding_e(e)

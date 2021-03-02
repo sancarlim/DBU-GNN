@@ -138,10 +138,13 @@ class MultiHeadGATLayer(nn.Module):
     
 class SCOUT_MDN(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True, ew_type=False):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.embedding_e = nn.Linear(1, hidden_dim)
+        if ew_type:
+            self.embedding_e = nn.Linear(3, hidden_dim) if  output_dim > 12 else  nn.Linear(2, hidden_dim) # ind -> 3 rel_pos+rel_vel+type / apollo rel_pos+type
+        else:
+            self.embedding_e = nn.Linear(1, hidden_dim)
         self.heads = heads
         if heads == 1:
             self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
@@ -149,8 +152,11 @@ class SCOUT_MDN(nn.Module):
             self.linear1 = nn.Linear(hidden_dim, output_dim)          
             self.mdn = MDN(hidden_dim, output_dim, 3)
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
+            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) 
+            if ew_type:
+                self.embedding_e2 = nn.Linear(3, hidden_dim*heads) if  output_dim > 12 else  nn.Linear(2, hidden_dim*heads) # ind -> 3 rel_pos+rel_vel+type / apollo rel_pos+type
+            else:
+                self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
             self.gat_2 = MultiHeadGATLayer(hidden_dim*heads,hidden_dim*heads, res_weight=res_weight , res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.linear1 = nn.Linear(hidden_dim*heads, hidden_dim*heads) 
             self.mdn = MDN(hidden_dim*heads, output_dim, 3)
