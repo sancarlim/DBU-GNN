@@ -3,24 +3,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-from torch.autograd import Variable
-from torch.distributions import Categorical
 import os
 os.environ['DGLBACKEND'] = 'pytorch'
-from dgl import DGLGraph
 import numpy as np
-from dgl.data import DGLDataset
 from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
 from roundD_Dataset import roundD_DGLDataset
-from models.GCN import GCN 
-from models.My_GAT import My_GAT
-from models.Gated_GCN import GatedGCN
-from models.gnn_rnn import Model_GNN_RNN
-from models.rnn_baseline import RNN_baseline
-from models.RGCN import RGCN
-from models.SCOUT_MDN import SCOUT_MDN
-from models.Gated_MDN import Gated_MDN
+from models.VAE_GNN import VAE_GNN
 import random
 import wandb
 import pytorch_lightning as pl
@@ -30,6 +19,7 @@ from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import ModelCheckpoint
 import argparse
 import math
+from torch.distributions.kl import kl_divergence
 '''
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str , default='gated_mdn' ,help='model type')
@@ -45,18 +35,7 @@ dataset = args.dataset
 
 
 ONEOVERSQRT2PI = 1.0 / math.sqrt(2*math.pi)
-# sets seeds for numpy, torch, python.random and PYTHONHASHSEED.
 
-def seed_torch(seed=42):
-	random.seed(seed)
-	os.environ['PYTHONHASHSEED'] = str(seed)
-	np.random.seed(seed)
-	torch.manual_seed(seed)
-	torch.cuda.manual_seed(seed)
-	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
-	torch.backends.cudnn.benchmark = False
-	torch.backends.cudnn.deterministic = True
-#seed_torch(42)
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -75,7 +54,7 @@ def collate_batch(samples):
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, train_dataset, val_dataset, test_dataset, dataset, history_frames: int=3, future_frames: int=3, input_dim: int=2, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., prob: bool = False):
+    def __init__(self, train_dataset, val_dataset, test_dataset, dataset, history_frames: int=3, future_frames: int=3, input_dim: int=2, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., prob: bool = False, mask: bool = False, rel_types: bool = False):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -98,6 +77,8 @@ class LitGNN(pl.LightningModule):
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
+        self.mask = mask
+        self.rel_types = rel_types
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -182,9 +163,8 @@ class LitGNN(pl.LightningModule):
             mask (B,G,12)  -  indicates wether there is data in that frame for each agent
         """
         pi, sigma, mu = pred  #B G 12
-        if torch.where(sigma == 0)[0].shape[0] != 0:
-            print('debug')
-        #mu = mu#*mask  #Don't penalize no-data frames
+        if self.mask:    
+            mu = mu*mask  #Don't penalize no-data frames
         target = target.contiguous().view(target.shape[0],-1)  
         prob = pi * self.gaussian_probability(sigma, mu, target)
         nll = -torch.log(torch.sum(prob, dim=1))
@@ -277,7 +257,7 @@ class LitGNN(pl.LightningModule):
             _, labels = self.compute_change_pos(feats,labels)
         
         e_w = batched_graph.edata['w'].float()
-        if self.model_type != 'gcn':
+        if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
         if self.model_type == 'rgcn':
@@ -320,7 +300,7 @@ class LitGNN(pl.LightningModule):
         
 
         e_w = batched_graph.edata['w']
-        if self.model_type != 'gcn':
+        if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
         if self.model_type == 'rgcn':
@@ -367,7 +347,7 @@ class LitGNN(pl.LightningModule):
             feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         '''
         e_w = batched_graph.edata['w'].float()
-        if self.model_type != 'gcn':
+        if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
         if self.model_type == 'rgcn':
@@ -407,7 +387,7 @@ class LitGNN(pl.LightningModule):
                 ade.append(ade_s) #S samples
                 fde.append(fde_s)
         
-            self.log_dict({'test/ade': min(ade), "test/fde": min(fde)}) #, sync_dist=True
+            self.log_dict({'test/ade': min(ade), "test/fde": fde[ade.index(min(ade))]}) #, sync_dist=True
         
         else:
             pred=pred.view(pred.shape[0],labels.shape[1],-1)
@@ -468,15 +448,15 @@ def sweep_train():
     future_frames = config.future_frames
 
     if config.dataset == 'apollo':
-        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False) #3447
-        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False)  #919
-        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False)  #230
+        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_types) #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_types)  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_types)  #230
         print(len(train_dataset), len(val_dataset))
         input_dim = 5
     elif config.dataset == 'ind':
-        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4)) #12281
-        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4))  #3509
-        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4))  #1754
+        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_types) #12281
+        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_types)  #3509
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_types)  #1754
         print(len(train_dataset), len(val_dataset), len(test_dataset))
         input_dim = 6
 
@@ -488,13 +468,13 @@ def sweep_train():
 
     if config.model_type == 'gat':
         hidden_dims = round(config.hidden_dims // config.heads)
-        model = SCOUT_MDN(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=config.heads, dropout=config.dropout, bn=False, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew)
+        model = SCOUT_MDN(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=config.heads, dropout=config.dropout, bn=False, feat_drop=config.feat_drop, attn_drop=config.attn_drop, att_ew=config.att_ew, ew_type=config.ew_types)
     elif config.model_type == 'gcn':
         model = model = GCN(in_feats=input_dim_model, hid_feats=config.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn, embedding=config.embedding)
     elif config.model_type == 'gated':
         model = GatedGCN(input_dim=input_dim_model, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'gated_mdn':
-        model = Gated_MDN(input_dim=input_dim_model, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
+        model = Gated_MDN(input_dim=input_dim_model, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn, ew_type=config.ew_types)
     elif config.model_type == 'baseline':
         model = RNN_baseline(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'rgcn':
@@ -502,22 +482,23 @@ def sweep_train():
     
 
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=history_frames, future_frames= future_frames, alfa= config.alfa,
-                        beta = config.beta, delta=config.delta, prob=config.probabilistic, dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset)  
+                        beta = config.beta, delta=config.delta, prob=config.probabilistic, dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, mask=config.mask, rel_types=config.ew_types)  
     '''
-    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=config.path,model=LitGNN_sys.model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=history_frames, future_frames= future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
+    path = '/media/14TBDISK/sandra/logs/ho09jdxb/swept-sweep-2/epoch=160-step=58120.ckpt'
+    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=path,model=LitGNN_sys.model, dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=history_frames, future_frames= future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
     print('############ TEST ##############')
-    trainer = pl.Trainer(gpus=gpus, profiler=True)
+    trainer = pl.Trainer(gpus=[0], profiler=True)
     trainer.test(LitGNN_sys)
     '''
    
     #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
     
     checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/'+os.environ.get('WANDB_SWEEP_ID')+'/'+run.name)
-    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=10)
-    trainer = pl.Trainer( weights_summary='full', gpus=[config.gpus], deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=6)
+    trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     #trainer.tune(LitGNN_sys)
     print('Best lr: ', LitGNN_sys.lr)
-    print('GPU Nº: ', config.gpus)
+    print('GPU Nº: ', device)
     print("############### TRAIN ####################")
     trainer.fit(LitGNN_sys)
     print('Model checkpoint path:',trainer.checkpoint_callback.best_model_path)
@@ -526,6 +507,35 @@ def sweep_train():
     if config.dataset != 'apollo':
         trainer.test(ckpt_path='best')   #None if fast_dev_run=True, 
 
+
+default_config = {
+            "probabilistic": True,
+            "mask":False,
+            "ew_types":True,
+            "input_dim": 6,
+            "dataset":'ind',
+            "history_frames":8,
+            "future_frames":12,
+            "learning_rate":1e-6,
+            "batch_size": 1,
+            "hidden_dims": 512,
+            "model_type": 'gated_mdn',
+            "dropout": 0.1,
+            "alfa": 0,
+            "beta": 0,
+            "delta": 0.,
+            "feat_drop": 0.,
+            "attn_drop":0.,
+            "bn":False,
+            "wd": 0.01,
+            "heads": 2,
+            "att_ew": True,               
+            "gcn_drop": 0.,
+            "gcn_bn": True,
+            'embedding':True
+        }
+
+device=os.environ.get('CUDA_VISIBLE_DEVICES')
 sweep_train()    
 '''
 if __name__ == '__main__':
