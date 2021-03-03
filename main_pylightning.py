@@ -41,12 +41,12 @@ import math
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str , default='gated_mdn' ,help='model type')
-parser.add_argument('--name', type=str , default='DEBUG gatedmdn test' ,help='sweep name')
+parser.add_argument('--name', type=str , default='DEBUG' ,help='sweep name')
 parser.add_argument('--count', type=int , default=16 ,help='sweep number of runs')
-parser.add_argument('--history_frames', type=int , default=6,help='Temporal size of the history sequence.')
-parser.add_argument('--future_frames', type=int , default=6 ,help='Temporal size of the predicted sequence.')
+parser.add_argument('--history_frames', type=int , default=8,help='Temporal size of the history sequence.')
+parser.add_argument('--future_frames', type=int , default=12 ,help='Temporal size of the predicted sequence.')
 parser.add_argument('--gpus', type=int , nargs='+',default=0)
-parser.add_argument('--dataset', type=str , default='apollo')
+parser.add_argument('--dataset', type=str , default='ind')
 parser.add_argument('--apollo_vel', type=bool , default=True)
 parser.add_argument('--norm', type=bool , default=True)
 parser.add_argument('--res_connection', type=bool , default=True)
@@ -68,7 +68,7 @@ def seed_torch(seed=42):
 	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
 	torch.backends.cudnn.benchmark = False
 	torch.backends.cudnn.deterministic = True
-seed_torch(42)
+seed_torch(121958)
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -253,7 +253,7 @@ class LitGNN(pl.LightningModule):
         new_mask_gt = (gt_vel[:, 1:]!=0) * (gt_vel[:, :-1]!=0) 
 
         gt_vel[:, 1:] = (gt_vel[:, 1:] - gt_vel[:, :-1]) * new_mask_gt
-        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]) * (gt[:, :1]!=0) 
+        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]) * new_mask_gt[:,0:1]
         feats_vel[:, 1:] = (feats_vel[:, 1:] - feats_vel[:, :-1]) * new_mask_feats
         feats_vel[:, 0] = 0
         
@@ -370,14 +370,15 @@ class LitGNN(pl.LightningModule):
 
          
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = test_batch
-        last_loc = feats[:,-1:,:2]
-        if dataset.lower() == 'apollo' and args.apollo_vel:
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = test_batch
+        last_loc = feats[:,-1:,:2].detach().clone()
+        '''
+        if self.dataset == 'apollo':
             #USE CHANGE IN POS AS INPUT
-            feats_vel,_ = self.compute_change_pos(feats,labels)
+            feats_vel,_ = self.compute_change_pos(feats,labels_pos)
             #Input pos + heading + vel
-            feats = torch.cat([feats_vel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
-
+            feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+        '''
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn':
             e_w= e_w.unsqueeze(1)
@@ -385,25 +386,25 @@ class LitGNN(pl.LightningModule):
         if self.model_type == 'rgcn':
             rel_type = batched_graph.edata['rel_type'].long()
             norm = batched_graph.edata['norm']
-            pred = self.model(batched_graph, feats[:,:,],e_w, rel_type,norm)
+            pred = self.model(batched_graph, feats,e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-
-        
+            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e)
+       
+       
         if self.probabilistic:
             ade = []
             fde = []         
             #En test batch=1 secuencia con n agentes
             #Para el most-likely coger el modo con pi mayor de los 3 y o bien coger muestra de la media 
-            for i in range(15): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
+            for i in range(10): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
                 preds=self.sample(pred)  #N,12
                 preds=preds.view(preds.shape[0],self.future_frames,-1)
-                if dataset.lower() == 'apollo':
-                    for j in range(1,labels.shape[1]):
-                        preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
-                    preds += last_loc
+                #if self.dataset == 'apollo':
+                for j in range(1,labels_pos.shape[1]):
+                    preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
+                preds += last_loc
 
-                _ , overall_num, x2y2_error = self.compute_RMSE_batch(preds[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+                _ , overall_num, x2y2_error = self.compute_RMSE_batch(preds[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
                 ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
                 ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
                 fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
@@ -418,10 +419,7 @@ class LitGNN(pl.LightningModule):
                                 break
                 ade.append(ade_s) #S samples
                 fde.append(fde_s)
-            with open('/home/sandra/PROGRAMAS/DBU_Graph/Apollo_MDN_test_result.txt', 'a') as f:
-                print(min(ade).item(), min(fde).item(), sep=' ', end='\n',file=f)
-         
-           
+        
             self.log_dict({'test/ade': min(ade), "test/fde": min(fde)}) #, sync_dist=True
         
         else:
@@ -485,7 +483,7 @@ class LitGNN(pl.LightningModule):
         
 def sweep_train():
 
-    #run=wandb.init()
+    #wandb.init()
     
     run=wandb.init(project="dbu_graph", config=default_config)
     config = wandb.config
@@ -505,33 +503,34 @@ def sweep_train():
     elif config.model_type == 'gated':
         model = GatedGCN(input_dim=input_dim, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'gated_mdn':
-        model = Gated_MDN(input_dim=input_dim, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn)
+        model = Gated_MDN(input_dim=input_dim, hidden_dim=config.hidden_dims, output_dim=output_dim, dropout=config.dropout, bn=config.bn, types=True)
     elif config.model_type == 'baseline':
         model = RNN_baseline(input_dim=5, hidden_dim=config.hidden_dims, output_dim=output_dim, pred_length=config.future_frames, dropout=config.dropout, bn=config.bn)
     elif config.model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=config.hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=config.embedding, bn=config.bn, dropout=config.dropout)
     
-    path = '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/quiet-sweep-1/epoch=164-step=10394.ckpt'#DGX/APOLLO/helpful-sweep-17/epoch=48-step=3282.ckpt'
+    path = '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/swept-sweep-2/epoch=160-step=58120.ckpt'#DGX/APOLLO/helpful-sweep-17/epoch=48-step=3282.ckpt'
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
-    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=path,model=LitGNN_sys.model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
-
+    
 
     #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+    '''
     ########################### TEST APOLLO MDN ############################
+    path = '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/swept-sweep-2/epoch=160-step=58120.ckpt'#DGX/APOLLO/helpful-sweep-17/epoch=48-step=3282.ckpt'
+    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=path,model=LitGNN_sys.model, input_dim=input_dim, lr=config.learning_rate, model_type= config.model_type, wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta, prob=config.probabilistic)
     print('############ TEST APOLLO ##############')
     trainer = pl.Trainer(gpus=0, profiler=True)
     trainer.test(LitGNN_sys)
     #########################################################
-    
+    '''
     checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='./logs/'+run.name, save_top_k=0)
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=6)
-    trainer = pl.Trainer(resume_from_checkpoint=path ,weights_summary='full', gpus=0,  logger=wandb_logger,  profiler=True, callbacks=[early_stop_callback,checkpoint_callback] ) # precision=16,precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+    trainer = pl.Trainer(weights_summary='full', gpus=1,  logger=wandb_logger,  profiler=True, callbacks=[early_stop_callback,checkpoint_callback] ) # precision=16,precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     #resume_from_checkpoint=path, 
     
     print('Best lr: ', LitGNN_sys.lr)
-    #print("############### TRAIN ####################")
-    #trainer.fit(LitGNN_sys)
-    #print('save:',trainer.checkpoint_callback.best_model_path)
+    print("############### TRAIN ####################")
+    trainer.fit(LitGNN_sys)
     #wandb.save(trainer.checkpoint_callback.best_model_path)
     
     print("############### TEST ####################")
@@ -701,9 +700,9 @@ if __name__ == '__main__':
     
     default_config = {
             "probabilistic": True,
-            "input_dim": 5,
-            "history_frames":6,
-            "future_frames":6,
+            "input_dim": input_dim[0],
+            "history_frames":history_frames,
+            "future_frames":future_frames,
             "learning_rate":1e-6,
             "batch_size": 1,
             "hidden_dims": 512,
@@ -716,7 +715,7 @@ if __name__ == '__main__':
             "attn_drop":0.,
             "bn":False,
             "wd": 0.01,
-            "heads": 3,
+            "heads": 2,
             "att_ew": True,               
             "gcn_drop": 0.,
             "gcn_bn": True,
