@@ -99,11 +99,11 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             #zero_indeces_list = [i for i in range(len(self.output_mask )) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
             self.test_id_list  = list(set(list(range(total_num)))) #- set(zero_indeces_list))
         else:
-            self.output_mask= self.all_feature[:,:,:,-1]#*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
+            self.output_mask= self.all_feature[:,:,now_history_frame:,-1]#*mask_car #mascara obj (car) visibles en 6º frame (5010,120,6,1)
             self.output_mask = self.output_mask.unsqueeze_(-1)
             # TRAIN VAL SETS
             # Remove empty rows from output mask 
-            zero_indeces_list = [i for i in range(len(self.output_mask[:,:,6:] )) if np.all(np.array(self.output_mask[:,:,6:] .squeeze(-1))==0, axis=(1,2))[i] == True ]
+            zero_indeces_list = [i for i in range(len(self.output_mask )) if np.all(np.array(self.output_mask.squeeze(-1))==0, axis=(1,2))[i] == True ]
             id_list = list(set(list(range(total_num))) - set(zero_indeces_list))
             total_valid_num = len(id_list)
             

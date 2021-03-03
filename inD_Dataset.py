@@ -87,7 +87,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         self.node_features = self.all_feature[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
         self.node_labels=self.all_feature[:,:,self.history_frames:,[0,1]]#*mask_car[:,:,self.history_frames:].unsqueeze(-1)  #x,y 3 ultimos frames    
         self.track_info = self.all_feature[:,:,:,info_feats_id]
-        self.output_mask= self.all_feature[:,:,:,-1] ###*mask_car  #mascara only_cars/peds visibles en 6º frame 
+        self.output_mask= self.all_feature[:,:,self.history_frames:,-1] ###*mask_car  #mascara only_cars/peds visibles en 6º frame 
         self.output_mask = self.output_mask.unsqueeze_(-1) #(5010,120,T_hist,1)
         self.xy_dist=[spatial.distance.cdist(self.node_features[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70
         self.vel_l2 = [spatial.distance.cdist(self.node_features[i][:,now_history_frame,3:5].cpu(), self.node_features[i][:,now_history_frame,3:5].cpu()) for i in range(len(self.all_feature))]
@@ -166,12 +166,12 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         gt = self.node_labels[idx,self.all_visible_object_idx[idx]]  #graph.ndata['gt']   (N,Tpred,2)
         output_mask = self.output_mask[idx,self.all_visible_object_idx[idx]]
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
-        rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
+        #rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
         if self.types:
-            rel_vels =  F.softmax(torch.tensor(rel_vels, dtype=torch.float32), dim=0)
+            #rel_vels =  F.softmax(torch.tensor(rel_vels, dtype=torch.float32), dim=0)
             distances = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
-            graph.edata['w'] = torch.tensor([[distances[i],rel_vels[i],rel_types[i]] for i in range(len(rel_types))], dtype=torch.float32)
+            graph.edata['w'] = torch.tensor([[distances[i],rel_types[i]] for i in range(len(rel_types))], dtype=torch.float32)
         else:
             graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
 

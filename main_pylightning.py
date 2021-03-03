@@ -9,7 +9,14 @@ import numpy as np
 from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
 from roundD_Dataset import roundD_DGLDataset
-from models.VAE_GNN import VAE_GNN
+from models.GCN import GCN 
+from models.My_GAT import My_GAT
+from models.SCOUT_MDN import SCOUT_MDN
+from models.Gated_MDN import Gated_MDN
+from models.Gated_GCN import GatedGCN
+from models.gnn_rnn import Model_GNN_RNN
+from models.rnn_baseline import RNN_baseline
+from models.RGCN import RGCN
 import random
 import wandb
 import pytorch_lightning as pl
@@ -19,7 +26,6 @@ from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import ModelCheckpoint
 import argparse
 import math
-from torch.distributions.kl import kl_divergence
 '''
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str , default='gated_mdn' ,help='model type')
@@ -271,13 +277,13 @@ class LitGNN(pl.LightningModule):
         #Probabilistic vs. Deterministic output
         if self.probabilistic:
             #total_loss = self.bivariate_loss(pred, labels, output_masks[:,self.history_frames:self.total_frames,:])
-            mask = output_masks[:,self.history_frames:self.total_frames,:].expand(output_masks.shape[0],self.future_frames, 2)  #expand mask (B,Tpred,1) -> (B,T_pred,2)
+            mask = output_masks.expand(output_masks.shape[0],self.future_frames, 2)  #expand mask (B,Tpred,1) -> (B,T_pred,2)
             total_loss = self.mdn_loss(pred, labels,mask.contiguous().view(mask.shape[0],-1).unsqueeze(1).expand_as(pred[1]))  
         else:
             pred=pred.view(labels.shape[0],self.future_frames,-1)
             #Socially consistent
-            perc_overlap = self.check_overlap(pred*output_masks[:,self.history_frames:self.total_frames,:]) if self.alfa !=0 else 0
-            overall_sum_time, overall_num = self.huber_loss(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:], self.delta)  #(B,6)
+            perc_overlap = self.check_overlap(pred*output_masks) if self.alfa !=0 else 0
+            overall_sum_time, overall_num = self.huber_loss(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks, self.delta)  #(B,6)
             #overall_sum_time , overall_num, _ = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
             total_loss = torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2))*(1+self.alfa*perc_overlap) + self.beta*(overall_sum_time[-1]/overall_num.sum(dim=-2)[-1])
 
@@ -312,7 +318,7 @@ class LitGNN(pl.LightningModule):
         
         
         if self.probabilistic:
-            mask = output_masks[:,self.history_frames:self.total_frames,:].expand(output_masks.shape[0],self.future_frames, 2)  #expand mask (B,Tpred,1) -> (B,T_pred,2)
+            mask = output_masks.expand(output_masks.shape[0],self.future_frames, 2)  #expand mask (B,Tpred,1) -> (B,T_pred,2)
             total_loss = self.mdn_loss(pred, labels,mask.contiguous().view(mask.shape[0],-1).unsqueeze(1).expand_as(pred[1]))  
         else:
             pred=pred.view(labels.shape[0],self.future_frames,-1)
@@ -322,7 +328,7 @@ class LitGNN(pl.LightningModule):
                     pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2 
                 pred += last_loc
            
-            _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+            _ , overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks)
             total_loss = torch.sum(torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)) #T->1
 
         self.log( "Sweep/val_loss", total_loss, sync_dist=True )   #torch.sum(overall_loss_time).clone().detach()
@@ -371,7 +377,7 @@ class LitGNN(pl.LightningModule):
                     preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
                 preds += last_loc
 
-                _ , overall_num, x2y2_error = self.compute_RMSE_batch(preds[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+                _ , overall_num, x2y2_error = self.compute_RMSE_batch(preds[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks)
                 ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
                 ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
                 fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
@@ -397,8 +403,8 @@ class LitGNN(pl.LightningModule):
                     pred[:,i,:] = torch.sum(pred[:,i-1:i+1,:],dim=-2) #BV,6,2 
                 pred += last_loc
                 
-            _, overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
-            long_err, lat_err, _ = self.compute_long_lat_error(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks[:,self.history_frames:self.total_frames,:])
+            _, overall_num, x2y2_error = self.compute_RMSE_batch(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks)
+            long_err, lat_err, _ = self.compute_long_lat_error(pred[:,:self.future_frames,:], labels[:,:self.future_frames,:], output_masks)
             overall_loss_time = torch.sum((x2y2_error**0.5),dim=0) / torch.sum(overall_num, dim=0) #T
             overall_loss_time[torch.isnan(overall_loss_time)]=0
             overall_long_err = torch.sum(long_err.detach(),dim=0) / torch.sum(overall_num, dim=0) #T
