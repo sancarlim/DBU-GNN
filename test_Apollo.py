@@ -27,6 +27,7 @@ from models.My_GAT import My_GAT
 from models.rnn_baseline import RNN_baseline
 from models.RGCN import RGCN
 from models.Gated_MDN import Gated_MDN
+from models.SCOUT_MDN import SCOUT_MDN
 from models.Gated_GCN import GatedGCN
 from models.gnn_rnn import Model_GNN_RNN
 from tqdm import tqdm
@@ -49,14 +50,14 @@ def seed_torch(seed=0):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-seed_torch()
+seed_torch(121958)
 
         
 def collate_test(samples):
     graphs, feats , track_info, obj_class, mean_xy, masks = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = np.vstack(masks)
+    masks = torch.vstack(masks)
     feats = torch.vstack(feats)
-    track_info = np.vstack(track_info)
+    track_info = torch.vstack(track_info)
     sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
     snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
     snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
@@ -69,7 +70,7 @@ def collate_test(samples):
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self,model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gat', wd: float = 1e-1, dataset: str = 'ind', history_frames: int=6, future_frames: int=6 ):
+    def __init__(self,model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gat', wd: float = 1e-1, dataset: str = 'ind', history_frames: int=6, future_frames: int=6 , rel_types: bool = False):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -95,6 +96,7 @@ class LitGNN(pl.LightningModule):
         self.feats_x_list = []
         self.feats_y_list = []
         self.track_info_list = []
+        self.rel_types = rel_types
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
         pred = self.model(graph, feats,e_w,snorm_n,snorm_e)   #inference
@@ -153,7 +155,7 @@ class LitGNN(pl.LightningModule):
         sample = Variable(sigma.data.new(sigma.size(0), sigma.size(2)).normal_()) #B,12
         for i, idx in enumerate(pis):
             #sample from one of the modes for each agent in the batch z=mu(idx)+sigma(idx)*N(0,I) , where idx ~ pi
-            sample[i] = sample[i].mul(sigma[i,idx]).add(mu[i,idx]) #sigma[i,idx].add(mu[i,idx]) 
+            sample[i] = sample[i].mul(sigma[i,idx]).add(mu[i,idx])  
         return sample
 
 
@@ -228,7 +230,7 @@ class LitGNN(pl.LightningModule):
         feats = torch.cat([feats_vel, feats[:,:,2:input_feat]], dim=-1)[:,1:,:]
 
         e_w = batched_graph.edata['w'].float()
-        if self.model_type != 'gcn':
+        if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
         if self.model_type == 'rgcn':
@@ -266,14 +268,15 @@ class LitGNN(pl.LightningModule):
 if __name__ == "__main__":
 
     hidden_dims = 512
-    heads = 3
+    heads = 2
     input_feat = 5
-    model_type = 'gated_mdn'
+    model_type = 'gat'
     history_frames = 6
     future_frames= 6
     probabilistic = True
+    ew_types=True
 
-    test_dataset = ApolloScape_DGLDataset(train_val='test',test=True)  #230
+    test_dataset = ApolloScape_DGLDataset(train_val='test', test=True, rel_types=ew_types)  #230
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_test, num_workers=12)  
     print(len(test_dataloader))
     input_dim = input_feat*5  #feats vel+head+obj+mask * 5frames (remove vel[0])  #6*history_frames
@@ -281,18 +284,18 @@ if __name__ == "__main__":
 
     if model_type == 'gat':
         hidden_dims = round(hidden_dims/heads)
-        model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=False, feat_drop=0, attn_drop=0, att_ew=True)
+        model = SCOUT_MDN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, bn=False, att_ew=True, ew_type=ew_types)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
         model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn= True)
     elif model_type == 'gated_mdn':
-        model = Gated_MDN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn=True)
+        model = Gated_MDN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1,bn=True, ew_type=ew_types)
     elif model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=True, bn=False, dropout=0.1) 
 
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path= '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/quiet-sweep-1/epoch=164-step=10394.ckpt',model=LitGCN_sys.model)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path= '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/APOLLO/lemon-sweep-2/epoch=301-step=19025.ckpt',model=LitGCN_sys.model, rel_types=ew_types)
     LitGCN_sys.model_type = model_type 
     LitGCN_sys.history_frames = history_frames
     LitGCN_sys.future_frames = future_frames
