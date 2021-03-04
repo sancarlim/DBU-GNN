@@ -226,7 +226,7 @@ class VAE_GNN(nn.Module):
         # Input GNN
         h = self.GNN_inp(g, h, e_w, snorm_n)
         #Sample from gaussian distribution (BV, Z_dim)
-        z_sample = torch.distributions.Normal(torch.zeros((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device), torch.ones((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device))
+        z_sample = torch.distributions.Normal(torch.zeros((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device), torch.ones((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device)).sample()
         
         #DECODE 
         h_dec = torch.cat([h, z_sample],dim=-1)

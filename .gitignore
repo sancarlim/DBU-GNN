@@ -163,9 +163,6 @@ Graph_InitialTests.ipynb
 /GRIP/
 ApolloScape
 ApolloScape_process.py
-models/GCN.py
-models/Gated_GCN.py
-models/GCN.py
 DBU_Graph.yml
 DBU_Graph_env.yaml
-core
+models/GCN.py
