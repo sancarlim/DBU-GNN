@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from torch.autograd import Variable
+from torch.distributions import Categorical
 import os
 os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
@@ -516,17 +518,17 @@ def sweep_train():
 
 default_config = {
             "probabilistic": True,
-            "mask":False,
+            "mask":True,
             "ew_types":True,
             "input_dim": 6,
-            "dataset":'ind',
-            "history_frames":8,
-            "future_frames":12,
-            "learning_rate":1e-6,
-            "batch_size": 1,
-            "hidden_dims": 512,
-            "model_type": 'gated_mdn',
-            "dropout": 0.1,
+            "dataset":'apollo',
+            "history_frames":6,
+            "future_frames":6,
+            "learning_rate":1e-4,
+            "batch_size": 512,
+            "hidden_dims": 768,
+            "model_type": 'gat',
+            "dropout": 0.5,
             "alfa": 0,
             "beta": 0,
             "delta": 0.,
