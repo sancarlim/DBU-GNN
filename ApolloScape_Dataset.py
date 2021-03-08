@@ -34,11 +34,12 @@ def collate_batch(samples):
     return batched_graph, masks, snorm_n, snorm_e, feats, gt
 
 class ApolloScape_DGLDataset(torch.utils.data.Dataset):
-    def __init__(self, train_val,  test=False, data_path=None, rel_types=False):
+    def __init__(self, train_val,  test=False, data_path=None, rel_types=False, scale_factor=1):
         self.raw_dir='/media/14TBDISK/sandra/apollo_train_data.pkl'
         self.train_val=train_val
         self.test = test
         self.rel_types = rel_types
+        self.scale_factor = scale_factor
         if test:
             self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_test_data.pkl'
         self.process() 
@@ -82,10 +83,10 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12)#.to('cuda') #120x12
         '''
 
-        #rescale_xy=torch.ones((1,1,1,2))
+        rescale_xy=torch.ones((1,1,1,2))*self.scale_factor
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
-        #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
+        self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy  #scale input x,y - positions
         self.node_features = self.all_feature[:,:,:now_history_frame, feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
         self.node_labels=self.all_feature[:,:,now_history_frame:,[3,4]] #x,y 6 ultimos frames
         #self.node_features[:,:,:,-1] *= mask_car[:,:,:6]   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car

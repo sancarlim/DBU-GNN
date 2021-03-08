@@ -10,6 +10,7 @@ from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
 from roundD_Dataset import roundD_DGLDataset
 from models.VAE_GNN import VAE_GNN
+#from models.VAE_GATED import VAE_GATED
 import random
 import wandb
 import pytorch_lightning as pl
@@ -41,7 +42,7 @@ def collate_batch(samples):
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model,  train_dataset, val_dataset, test_dataset, dataset,  history_frames: int=3, future_frames: int=3, input_dim: int=2, lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., rel_types: bool = False):
+    def __init__(self, model,  train_dataset, val_dataset, test_dataset, dataset,  history_frames: int=3, future_frames: int=3, input_dim: int=2, lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., rel_types: bool = False, scale_factor=1):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -63,6 +64,7 @@ class LitGNN(pl.LightningModule):
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
         self.rel_types = rel_types
+        self.scale_factor = scale_factor
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -81,7 +83,7 @@ class LitGNN(pl.LightningModule):
         return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, collate_fn=collate_batch)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
+        return DataLoader(self.test_dataset, batch_size=512, shuffle=False, num_workers=12, collate_fn=collate_batch) 
     
     def compute_RMSE(self,pred, gt, mask): 
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
@@ -102,7 +104,7 @@ class LitGNN(pl.LightningModule):
 
     
     def vae_loss(self, pred, gt, mask, mu, log_var, beta=1, reconstruction_loss='huber'):
-        #overall_sum_time, overall_num, _ = self.compute_RMSE(pred, gt, mask) #T
+        #Train with Huber . Validate with MSE
         if reconstruction_loss == 'huber':
             overall_sum_time, overall_num = self.huber_loss(pred, gt, mask, self.delta)  #T
         else:
@@ -144,9 +146,11 @@ class LitGNN(pl.LightningModule):
         feats_vel = feats[:,:,:2].clone()
         new_mask_feats = (feats_vel[:, 1:]!=0) * (feats_vel[:, :-1]!=0) 
         new_mask_gt = (gt_vel[:, 1:]!=0) * (gt_vel[:, :-1]!=0) 
+            
+        rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
 
         gt_vel[:, 1:] = (gt_vel[:, 1:] - gt_vel[:, :-1]) * new_mask_gt
-        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]) * new_mask_gt[:,0:1]
+        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]*rescale_xy) * new_mask_gt[:,0:1]
         feats_vel[:, 1:] = (feats_vel[:, 1:] - feats_vel[:, :-1]) * new_mask_feats
         feats_vel[:, 0] = 0
         
@@ -164,14 +168,16 @@ class LitGNN(pl.LightningModule):
     
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = train_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
+        '''
         if self.dataset  == 'apollo':
             #USE CHANGE IN POS AS INPUT
-            feats_vel, labels = self.compute_change_pos(feats,labels)
+            feats_vel, labels = self.compute_change_pos(feats,labels_pos)
             #Input pos + heading + vel
             feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-            _, labels = self.compute_change_pos(feats,labels)
+        '''
+        _, labels = self.compute_change_pos(feats,labels_pos)
 
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
@@ -187,18 +193,20 @@ class LitGNN(pl.LightningModule):
 
     def validation_step(self, val_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = val_batch
-        last_loc = feats[:,-1:,:2]
+        '''
         if self.dataset == 'apollo':
             #USE CHANGE IN POS AS INPUT
             feats_vel,labels = self.compute_change_pos(feats,labels_pos)
             #Input pos + heading + vel
             feats = torch.cat([feats_vel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-            _, labels = self.compute_change_pos(feats,labels_pos)
+        '''
+        _, labels = self.compute_change_pos(feats,labels_pos)
 
         e_w = batched_graph.edata['w']
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
+        
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='mse')
@@ -235,7 +243,7 @@ class LitGNN(pl.LightningModule):
                 preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
             preds += last_loc
             #Compute error for this sample
-            _ , overall_num, x2y2_error = self.compute_RMSE(preds[:,:self.future_frames,:], labels_pos[:,:self.future_frames,:], output_masks)
+            _ , overall_num, x2y2_error = self.compute_RMSE(preds, labels_pos, output_masks)
             ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
             ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
             fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
@@ -255,7 +263,6 @@ class LitGNN(pl.LightningModule):
         
    
 def sweep_train():
-
     seed=seed_everything(np.random.randint(1000000))
     run=wandb.init()  #for sweep
     #run=wandb.init(project="dbu_graph", config=default_config) #for single run
@@ -265,9 +272,9 @@ def sweep_train():
     future_frames = config.future_frames
 
     if config.dataset == 'apollo':
-        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_dims>1) #3447
-        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_dims>1)  #919
-        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_dims>1)  #230
+        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor) #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)  #230
         print(len(train_dataset), len(val_dataset))
         input_dim = 5
     elif config.dataset == 'ind':
@@ -280,12 +287,12 @@ def sweep_train():
     wandb_logger.experiment.log({'seed': seed}) 
     
     input_dim_model = input_dim*(history_frames-1) if config.dataset=='apollo' else input_dim*history_frames
-    output_dim = 2*future_frames #if config.probabilistic == False else 5*future_frames
+    output_dim = 2*future_frames 
 
     model = VAE_GNN(input_dim_model, config.hidden_dims//config.heads, config.z_dims, output_dim, fc=False, dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop, heads=config.heads, att_ew=config.att_ew, ew_dims=config.ew_dims)
 
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate,  wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta,
-    dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=config.ew_dims>1)
+    dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)
     #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
     
     checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/'+os.environ.get('WANDB_SWEEP_ID')+'/'+run.name)

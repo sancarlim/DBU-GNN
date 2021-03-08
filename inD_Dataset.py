@@ -83,7 +83,7 @@ class inD_DGLDataset(torch.utils.data.Dataset):
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,0]))  #121  - test 119.3
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,1]))   #77   -  test 79
         rescale_xy=torch.ones((1,1,1,2))*10
-        self.all_feature[:,:,:now_history_frame,:2] = self.all_feature[:,:,:now_history_frame,:2]/rescale_xy
+        self.all_feature[:,:,:now_history_frame+1,:2] = self.all_feature[:,:,:now_history_frame+1,:2]/rescale_xy
 
         
         self.node_features = self.all_feature[:,:,:self.history_frames,feature_id]#*mask_car[:,:,:self.history_frames].unsqueeze(-1)  #x,y,heading,vx,vy 5 primeros frames 5s
