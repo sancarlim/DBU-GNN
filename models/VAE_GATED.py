@@ -126,18 +126,17 @@ class GATED_VAE(nn.Module):
             nn.init.kaiming_normal_(self.linear.weight, a=0.01, nonlinearity='leaky_relu') 
         
     
-    def forward(self, g, h,e_w,snorm_n):
+    def forward(self, g, h, e, snorm_n, snorm_e):
         h, e = self.GatedGCN1(g, h, e, snorm_n, snorm_e)
         h, e = self.GatedGCN2(g, h, e, snorm_n, snorm_e)
         if self.fc:
             h = self.dropout_l(h)
             h=F.leaky_relu(self.linear(h))
-        return h
+        return h, e
     
-class VAE_GNN(nn.Module):
+class VAE_GATED(nn.Module):
     def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2,  ew_dims=1):
         super().__init__()
-        self.heads = heads
         self.fc = fc
         self.z_dim = z_dim
 
@@ -153,20 +152,21 @@ class VAE_GNN(nn.Module):
         self.GNN_enc_gt = GATED_VAE(hidden_dim, fc=fc, dropout=dropout)
         
         #ENCODER
-        input_enc_dims = hidden_dim*heads if fc else hidden_dim*heads*2 
+        input_enc_dims = hidden_dim if fc else hidden_dim*2 
         self.encoder = MLP_Enc(input_enc_dims, z_dim, dropout=dropout)
 
         #DECODER
-        dec_dims = z_dim + hidden_dim*heads//2 if fc else (z_dim + hidden_dim*heads)  #640  
+        dec_dims = z_dim + hidden_dim//2 if fc else (z_dim + hidden_dim)  #768+100  512+100  1024+100
+        self.embedding_e_dec = nn.Linear(hidden_dim, dec_dims)
         self.GNN_decoder = GATED_VAE(dec_dims, fc=fc, dropout=dropout) 
         self.MLP_decoder = nn.Sequential(
-            nn.Linear(dec_dims*heads, dec_dims),  #1280->640
+            nn.Linear(dec_dims, dec_dims//2),  #868->434  ,  612->306  , 1124-->562
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(dec_dims, 300),   #640->300
+            nn.Linear(dec_dims//2, dec_dims//4),   
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(300, output_dim)   #300->12
+            nn.Linear(dec_dims//4, output_dim)  
         )
 
         if fc:
@@ -178,7 +178,8 @@ class VAE_GNN(nn.Module):
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.embedding_e.weight)      
+        nn.init.xavier_normal_(self.embedding_e.weight)          
+        nn.init.xavier_normal_(self.embedding_e_dec.weight)    
         nn.init.xavier_normal_(self.embedding_gt.weight)      
         nn.init.kaiming_normal_(self.MLP_decoder[0].weight, nonlinearity='relu')
         nn.init.kaiming_normal_(self.MLP_decoder[3].weight, nonlinearity='relu')
@@ -211,13 +212,15 @@ class VAE_GNN(nn.Module):
         e = self.embedding_e(e_w)
         g.edata['w']=e
         # Input GNN
-        h = self.GNN_inp(g, h, e_w, snorm_n)
+        h, e_inp = self.GNN_inp(g, h, e, snorm_n, snorm_e)
         #Sample from gaussian distribution (BV, Z_dim)
         z_sample = torch.distributions.Normal(torch.zeros((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device), torch.ones((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device)).sample()
         
         #DECODE 
         h_dec = torch.cat([h, z_sample],dim=-1)
-        h = self.GNN_decoder(g,h_dec,e_w,snorm_n)
+        #Embedding for having dimmensions of edge feats = dimmensions of node feats
+        e_dec = self.embedding_e_dec(e_inp)
+        h = self.GNN_decoder(g,h_dec,e_dec,snorm_n, snorm_e)
         recon_y = self.MLP_decoder(h)
         return recon_y
     
@@ -230,24 +233,26 @@ class VAE_GNN(nn.Module):
         e = self.embedding_e(e_w)
         g.edata['w']=e
         # Input GNN
-        h = self.GNN_inp(g, h, e_w, snorm_n)
+        h, e_inp = self.GNN_inp(g, h, e, snorm_n, snorm_e)
         
         #ENCODE
         # Encode ground truth trajectories to have the same shape as h
         h_gt = self.embedding_gt(gt)
-        h_gt = self.GNN_enc_gt(g, h_gt, e_w, snorm_n)
+        h_gt, _ = self.GNN_enc_gt(g, h_gt, e, snorm_n, snorm_e)
         mu, log_var = self.encoder(h, h_gt)   # Latent distribution
         #Sample from the latent distribution
         z_sample = self.reparameterize(mu, log_var)
         
         #DECODE 
         h_dec = torch.cat([h, z_sample],dim=-1)
-        h = self.GNN_decoder(g,h_dec,e_w,snorm_n)
+        #Embedding for having dimmensions of edge feats = dimmensions of node feats
+        e_dec = self.embedding_e_dec(e_inp)
+        h, _ = self.GNN_decoder(g,h_dec,e_dec,snorm_n, snorm_e)
         recon_y = self.MLP_decoder(h)
         return recon_y, mu, log_var
 
 if __name__ == '__main__':
-    model = VAE_GNN(48, 512, 128, 24, fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True)
+    model = VAE_GATED(48, 512, 128, 24, fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True)
     print(model)
 
     

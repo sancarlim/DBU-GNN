@@ -10,7 +10,7 @@ from ApolloScape_Dataset import ApolloScape_DGLDataset
 from inD_Dataset import inD_DGLDataset
 from roundD_Dataset import roundD_DGLDataset
 from models.VAE_GNN import VAE_GNN
-#from models.VAE_GATED import VAE_GATED
+from models.VAE_GATED import VAE_GATED
 import random
 import wandb
 import pytorch_lightning as pl
@@ -141,13 +141,13 @@ class LitGNN(pl.LightningModule):
         return torch.count_nonzero(intersect)/len(intersect) #percentage of intersections between all combinations
         #y_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,1].cpu()-preds[j,:,1].cpu()))).size > 0 for j in range(i+1,len(preds)) for i in range(len(preds)-1)]
 
-    def compute_change_pos(self, feats,gt):
+    def compute_change_pos(self, feats,gt, scale_factor):
         gt_vel = gt.clone()  #.detach().clone()
         feats_vel = feats[:,:,:2].clone()
         new_mask_feats = (feats_vel[:, 1:]!=0) * (feats_vel[:, :-1]!=0) 
         new_mask_gt = (gt_vel[:, 1:]!=0) * (gt_vel[:, :-1]!=0) 
             
-        rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
+        rescale_xy=torch.ones((1,1,2), device=self.device)*scale_factor
 
         gt_vel[:, 1:] = (gt_vel[:, 1:] - gt_vel[:, :-1]) * new_mask_gt
         gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]*rescale_xy) * new_mask_gt[:,0:1]
@@ -169,15 +169,14 @@ class LitGNN(pl.LightningModule):
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
-        '''
+        
         if self.dataset  == 'apollo':
-            #USE CHANGE IN POS AS INPUT
-            feats_vel, labels = self.compute_change_pos(feats,labels_pos)
+            #Use relative positions
+            feats_rel, labels = self.compute_change_pos(feats,labels_pos,1)
             #Input pos + heading + vel
-            feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+            feats = torch.cat([feats_rel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-        '''
-        _, labels = self.compute_change_pos(feats,labels_pos)
+            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
 
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
@@ -193,15 +192,14 @@ class LitGNN(pl.LightningModule):
 
     def validation_step(self, val_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = val_batch
-        '''
+        
         if self.dataset == 'apollo':
-            #USE CHANGE IN POS AS INPUT
-            feats_vel,labels = self.compute_change_pos(feats,labels_pos)
+            #Use relative positions
+            feats_rel,labels = self.compute_change_pos(feats,labels_pos,1)
             #Input pos + heading + vel
-            feats = torch.cat([feats_vel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
+            feats = torch.cat([feats_rel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-        '''
-        _, labels = self.compute_change_pos(feats,labels_pos)
+            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
 
         e_w = batched_graph.edata['w']
         if not self.rel_types:
@@ -272,9 +270,9 @@ def sweep_train():
     future_frames = config.future_frames
 
     if config.dataset == 'apollo':
-        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor) #3447
-        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)  #919
-        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)  #230
+        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_dims>1) #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_dims>1)  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_dims>1)  #230
         print(len(train_dataset), len(val_dataset))
         input_dim = 5
     elif config.dataset == 'ind':
@@ -289,7 +287,10 @@ def sweep_train():
     input_dim_model = input_dim*(history_frames-1) if config.dataset=='apollo' else input_dim*history_frames
     output_dim = 2*future_frames 
 
-    model = VAE_GNN(input_dim_model, config.hidden_dims//config.heads, config.z_dims, output_dim, fc=False, dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop, heads=config.heads, att_ew=config.att_ew, ew_dims=config.ew_dims)
+    if config.model_type == 'vae_gated':
+        model = VAE_GATED(input_dim_model, config.hidden_dims, z_dim=config.z_dims, output_dim=output_dim, fc=False, dropout=config.dropout,  ew_dims=config.ew_dims)
+    else:
+        model = VAE_GNN(input_dim_model, config.hidden_dims//config.heads, config.z_dims, output_dim, fc=False, dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop, heads=config.heads, att_ew=config.att_ew, ew_dims=config.ew_dims)
 
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate,  wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta,
     dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)

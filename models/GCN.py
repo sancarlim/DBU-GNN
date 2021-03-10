@@ -133,7 +133,7 @@ class GCN(nn.Module):
     def forward(self, graph, inputs,e_w,snorm_n, snorm_e):
 
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
-        h = inputs.view(inputs.shape[0],-1)
+        h = inputs.contiguous().view(inputs.shape[0],-1)
 
         # input embedding
         if self.embedding:
