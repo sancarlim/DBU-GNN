@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 
 class MLP_Enc(nn.Module):
     "Encoder: MLP that takes GNN output as input and returns mu and log variance of the latent distribution."
+    "The stddev of the distribution is treated as the log of the variance of the normal distribution for numerical stability."
     def __init__(self, in_dim, z_dim, dropout=0.2):
         super(MLP_Enc, self).__init__()
         self.in_dim = in_dim
@@ -170,16 +171,16 @@ class VAE_GNN(nn.Module):
         self.encoder = MLP_Enc(input_enc_dims, z_dim, dropout=dropout)
 
         #DECODER
-        dec_dims = z_dim + hidden_dim*heads//2 if fc else (z_dim + hidden_dim*heads)  #640
+        dec_dims = z_dim + hidden_dim*heads//2 if fc else (z_dim + hidden_dim*heads)  #640  
         self.GNN_decoder = GAT_VAE(dec_dims, fc=fc, dropout=dropout, feat_drop=feat_drop, attn_drop=attn_drop, heads=heads, att_ew=False, ew_dims=ew_dims) #If att_ew --> embedding_e_dec
         self.MLP_decoder = nn.Sequential(
             nn.Linear(dec_dims*heads, dec_dims),  #1280->640
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(dec_dims, 300),   #640->300
+            nn.Linear(dec_dims, dec_dims//2),   #640->300
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(300, output_dim)   #300->12
+            nn.Linear(dec_dims//2, output_dim)   #300->12
         )
 
         if fc:
