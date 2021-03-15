@@ -34,15 +34,11 @@ output_dim = future_frames*2
 
 default_config = {
             "ew_dims":2,
-            "input_dim": 6,
-            "history_frames":history_frames,
-            "future_frames":future_frames,
-            "learning_rate":1e-5,
+            "lr":1e-5,
             "batch_size": 1,
             "hidden_dims": 512,
             "z_dims": 128,
             "dropout": 0.1,
-            "alfa": 0,
             "beta": 1,
             "delta": 1,
             "feat_drop": 0.,
@@ -50,9 +46,7 @@ default_config = {
             "bn":False,
             "wd": 0.01,
             "heads": 2,
-            "att_ew": True,               
-            "gcn_drop": 0.,
-            "gcn_bn": True,
+            "att_ew": True,    
             'embedding':True
         }
 
@@ -73,24 +67,21 @@ def collate_batch(samples):
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model,  train_dataset, val_dataset, test_dataset, dataset,  history_frames: int=3, future_frames: int=3, input_dim: int=2, lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., rel_types: bool = False, scale_factor=1):
+    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, scale_factor=1):
         super().__init__()
         self.model= model
         self.lr = lr
-        self.input_dim = input_dim
         self.batch_size = batch_size
         self.wd = wd
         self.history_frames =history_frames
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
-        self.alfa = alfa
         self.beta = beta
         self.delta = delta
         self.overall_loss_time_list=[]
         self.overall_long_err_list=[]
         self.overall_lat_err_list=[]
         self.min_val_loss = 100
-        self.dataset = dataset
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
@@ -199,20 +190,9 @@ class LitGNN(pl.LightningModule):
     
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = train_batch
         
-        if self.dataset  == 'apollo':
-            #Use relative positions
-            feats_rel, labels = self.compute_change_pos(feats,labels_pos,1)
-            #Input pos + heading + vel
-            feats = torch.cat([feats_rel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
-        else:
-            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
-
-        # Reshape from (B*V,T,C) to (B*V,T*C) 
-        feats = feats.contiguous().view(feats.shape[0],-1)
-        labels = labels.contiguous().view(labels.shape[0],-1)
-
+        
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -227,20 +207,7 @@ class LitGNN(pl.LightningModule):
 
 
     def validation_step(self, val_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = val_batch
-        
-        if self.dataset == 'apollo':
-            #Use relative positions
-            feats_rel,labels = self.compute_change_pos(feats,labels_pos,1)
-            #Input pos + heading + vel
-            feats = torch.cat([feats_rel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
-        else:
-            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
-
-        
-        # Reshape from (B*V,T,C) to (B*V,T*C) 
-        feats = feats.contiguous().view(feats.shape[0],-1)
-        labels = labels.contiguous().view(labels.shape[0],-1)
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = val_batch
 
         e_w = batched_graph.edata['w']
         if not self.rel_types:
@@ -249,6 +216,7 @@ class LitGNN(pl.LightningModule):
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         labels=labels.view(labels.shape[0],self.future_frames,-1)
+        
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='mse')
 
         self.log_dict({"Sweep/val_loss": logs['loss'], "Sweep/val_mse_loss": logs['Reconstruction_Loss'], "Sweep/Val_KL": logs['KL']})
@@ -308,32 +276,37 @@ class LitGNN(pl.LightningModule):
 def main(args: Namespace):
     # keep track of parameters in logs
     print(args)
+
     seed=seed_everything(np.random.randint(1000000))
 
-    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1) #3447
-    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1)  #919
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1)  #230
+    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
+    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
     else:
         model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims)
 
-    LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=args.learning_rate,  wd=args.wd, history_frames=args.history_frames, future_frames= args.future_frames, alfa= args.alfa, beta = args.beta, delta=args.delta,
-    dataset=args.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+    LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
+    train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
     
     
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=3)
 
     if not args.nowandb:
-        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/',os.environ.get('WANDB_SWEEP_ID'),run.name))
-        run=wandb.init(project="dbu_graph", entity="sandracl72", job_type="training")  
+        run=wandb.init(project="nuscenes", entity="sandracl72", job_type="training")  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
         #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+        if os.environ.get('WANDB_SWEEP_ID') is not None: 
+            ckpt_folder = os.path.join(os.environ.get('WANDB_SWEEP_ID'), run.name)
+        else:
+            ckpt_folder = run.name
+        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/', ckpt_folder))
         trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     else:
-        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/',run.name))
+        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/',filename='nowandb-{epoch:02d}.ckpt')
         trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
 
     
@@ -355,19 +328,19 @@ if __name__ == '__main__':
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
-    parser.add_argument("--batch_size", type=int, default=512, help="Size of the batches")
-    parser.add_argument("--latent_dim", type=int, default=100, help="Dimensionality of the latent space")
+    parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
+    parser.add_argument("--z_dims", type=int, default=100, help="Dimensionality of the latent space")
     parser.add_argument("--hidden_dims", type=int, default=512)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
-                        choices=['vae_gat', 'vae_gated'])
+                                        choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
-    parser.add_argument("--att_drop", type=float, default=0.25)
+    parser.add_argument("--attn_drop", type=float, default=0.25)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument("--beta", type=float, default=1.0, help='Weighting factor of the KL divergence loss term')
     parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
     parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
-    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')
+    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')   
 
     
     device=os.environ.get('CUDA_VISIBLE_DEVICES')

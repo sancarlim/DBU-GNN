@@ -41,7 +41,7 @@ def collate_batch(samples):
 
 class nuscenes_Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val_test, history_frames, future_frames, data_path=None, classes=(1,2,3), rel_types=False):
+    def __init__(self, train_val_test, history_frames, future_frames, rel_types=True):
         '''
             :classes:   categories to take into account
             :rel_types: wether to include relationship types in edge features 
@@ -50,7 +50,6 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.total_frames = history_frames + future_frames
-        self.classes = classes
         self.types = rel_types
 
         if self.train_val_test == 'train':
@@ -71,7 +70,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         '''
         INPUT:
             :all_feature:   x,y_global (zero centralized per sequence), heading, vel, accel, heading_chang_rate, past_xy_local (4f*2), future_xy_local(12f*2), 
-                                    mask(12f), type, l,w,h, frame_id, scene_id, node_token (str), sample_token (str) ---> (58) 
+                                    mask(12f), type, l,w,h, frame_id, scene_id ---> (58) 
             :all_mean_xy:   mean_xy per sequence for zero centralization
             :all_adjacency: Adjacency matrix per sequence for building graph
         RETURNS:
@@ -103,14 +102,12 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         object_type = torch.tensor(self.all_feature[idx][:,-8], dtype=torch.int)
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx])).int()
-        graph = dgl.remove_self_loop(graph)
+
+        # Compute relation types
         edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
-        rel_types = [(object_type[u]* object_type[v])for u,v in edges_uvs]
-        graph = dgl.add_self_loop(graph)
-        rel_types.extend(torch.zeros_like(rel_types[0], dtype=torch.float32) for i in range(graph.num_nodes()))
-        feats = self.all_feature[idx][:,self.feature_id] 
-        gt = self.all_feature[idx][:,self.labels_id]  
-        output_mask = self.all_feature[idx][:,self.mask_id]
+        rel_types = [torch.zeros(1, dtype=torch.int) if u==v else (object_type[u]*object_type[v]) for u,v in edges_uvs]
+        
+        # Compute distances among neighbors
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         #rel_vels = [self.vel_l2[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
@@ -121,6 +118,10 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         else:
             graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
 
+
+        feats = torch.tensor(self.all_feature[idx][:,self.feature_id], dtype=torch.float32)
+        gt = torch.tensor(self.all_feature[idx][:,self.labels_id], dtype=torch.float32)
+        output_mask = torch.tensor(self.all_feature[idx][:,self.mask_id], dtype=torch.int32).unsqueeze(-1)
         
         return graph, output_mask, feats, gt
 
@@ -128,7 +129,7 @@ if __name__ == "__main__":
     
     train_dataset = nuscenes_Dataset(train_val_test='train', history_frames=history_frames, future_frames=future_frames)  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
-    train_dataloader=iter(DataLoader(train_dataset, batch_size=5, shuffle=False, collate_fn=collate_batch) )
+    train_dataloader=iter(DataLoader(train_dataset, batch_size=25, shuffle=False, collate_fn=collate_batch) )
     while(1):
         batched_graph, masks, snorm_n, snorm_e, feats, gt = next(train_dataloader)
         print(feats.shape)

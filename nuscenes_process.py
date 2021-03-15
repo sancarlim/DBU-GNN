@@ -384,7 +384,7 @@ for data_class in ['train', 'val', 'test']:
     all_tokens = np.array(all_tokens, dtype=object)
     save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_' + data_class + '.pkl'
     with open(save_path, 'wb') as writer:
-        pickle.dump([all_data, all_adjacency, all_mean_xy], writer)
+        pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
     print(f'Processed {all_data.shape[0]} sequences and {len(ns_scene_names[data_class])} scenes.')
 
 
