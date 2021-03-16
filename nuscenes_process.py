@@ -22,6 +22,9 @@ from nuscenes.prediction.input_representation.combinators import Rasterizer
 #508 0 sequences???
 scene_blacklist = [499, 515, 517]
 
+max_num_objects = 150 #To return np array 
+total_feature_dimension = 14 #x,y,heading,vel,acc,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects
+
 FREQUENCY = 2
 dt = 1 / FREQUENCY
 history = 2
@@ -127,29 +130,29 @@ def calculate_rotated_bboxes(center_points_x, center_points_y, length, width, ro
 
     return rotated_bbox_vertices
 
-def process_tracks(track, current_frame):
+def process_tracks(tracks, start_frame, end_frame, current_frame):
     '''
         Tracks: a list of (n_frames ~40f = 20s) tracks_per_frame ordered by frame.
                 Each row (track) contains a dict, where each key corresponds to an array of data from all agents in that frame.
         
         Returns data processed for a sequence of 8s (2s of history, 6s of labels)
     '''
-    sample_token = track['sample_token'][0]
-    visible_node_id_list = track["node_id"]  #All agents in the current frame      
+    sample_token = tracks[current_frame]['sample_token'][0]
+    visible_node_id_list = tracks[current_frame]["node_id"]  #All agents in the current frame      
     num_visible_object = len(visible_node_id_list)
 
     #Zero-centralization per frame (sequence)
-    mean_xy = [track['x_global'].mean(),track['y_global'].mean()]
-    track['position'][:,:2] = track['position'][:,:2] - mean_xy
+    mean_xy = [tracks[current_frame]['x_global'].mean(),tracks[current_frame]['y_global'].mean(),0]
+    #tracks['position'][:,:2] = tracks['position'][:,:2] - mean_xy
 
     # You can convert global coords to local frame with: helper.convert_global_coords_to_local(coords,starting_annotation['translation'], starting_annotation['rotation'])
     # x_global y_global are centralized in 0 taking into account all objects positions in the current frame
-    xy = track['position'][:, :2].astype(float)
+    xy = tracks[current_frame]['position'][:, :2].astype(float)
     # Compute distance between any pair of objects
     dist_xy = spatial.distance.cdist(xy, xy)  
     # If their distance is less than ATTENTION RADIUS (neighbor_distance), we regard them as neighbors.
-    neighbor_matrix = np.zeros((num_visible_object, num_visible_object))
-    neighbor_matrix = (dist_xy<neighbor_distance).astype(int)
+    neighbor_matrix = np.zeros((max_num_objects, max_num_objects))
+    neighbor_matrix[:num_visible_object,:num_visible_object] = (dist_xy<neighbor_distance).astype(int)
 
     #Retrieve all past and future trajectories
     '''
@@ -158,8 +161,9 @@ def process_tracks(track, current_frame):
     future_xy_local_list=[value for key,value in future_xy_local.items()]
     past_xy_local_list=[value for key,value in past_xy_local.items()]
     '''
-    # Retrieve features and labels for each agent (N, 23)
+    ########## Retrieve features and labels for each agent 
 
+    ''' FIRST OPTION 
     # Get past and future trajectories
     future_xy_local = np.zeros((num_visible_object, future_frames*2))
     past_xy_local = np.zeros((num_visible_object, 2*history_frames))
@@ -173,31 +177,35 @@ def process_tracks(track, current_frame):
         
     object_features = np.column_stack((
             track['position'], track['motion'], past_xy_local, future_xy_local, mask, track['info_agent'],
-            track['info_sequence'] ))  # 3 + 3 + 8 + 24 + 12 + 4 + 2 + 1 + 1 = 58   
+            track['info_sequence'] ))  # 3 + 3 + 8 + 24 + 12 + 4 + 2 = 56   
 
     inst_sample_tokens = np.column_stack((track['node_id'], track['sample_token']))
     '''
+
+    ######## SECOND OPTION (like inD)
+    now_all_object_id = set([val for frame in range(start_frame, end_frame) for val in tracks[frame]["node_id"]])  #todos los obj en los15 hist frames
+    non_visible_object_id_list = list(now_all_object_id - set(visible_node_id_list))  #obj en alguno de los 15 frames pero no el ultimo
+    total_num = len(now_all_object_id)
+
     object_feature_list = []
     for frame_ind in range(start_frame, end_frame):	
-        for node_id in visible_node_id_list:
-            node_idx = np.where(tracks[frame_ind]['node_id']==node_id)[0]
-            if node_idx.size:
-                now_frame_feature_dict = {node_id : (
-                    list(tracks[frame_ind]['position'][node_idx][0])+ 
-                    list(tracks[frame_ind]['velocity'][node_idx][0]) + 
-                    list(tracks[frame_ind]['info_sequence'])+
-                    [node_id]+
-                    list(tracks[frame_ind]['info_agent'][node_idx[0]]) 
-                    )}
+        now_frame_feature_dict = {node_id : (
+            list(tracks[frame_ind]['position'][np.where(np.array(tracks[frame_ind]['node_id'])==node_id)[0][0]] - mean_xy)+ 
+            list(tracks[frame_ind]['motion'][np.where(np.array(tracks[frame_ind]['node_id'])==node_id)[0][0]]) + 
+            list(tracks[frame_ind]['info_agent'][np.where(np.array(tracks[frame_ind]['node_id'])==node_id)[0][0]]) +
+            list(tracks[frame_ind]['info_sequence'][0]) + [1] + [num_visible_object]
+            ) for node_id in tracks[frame_ind]["node_id"] if node_id in visible_node_id_list}
         # if the current object is not at this frame, we return all 0s 
         now_frame_feature = np.array([now_frame_feature_dict.get(vis_id, np.zeros(total_feature_dimension)) for vis_id in visible_node_id_list])
         object_feature_list.append(now_frame_feature)
 
     object_feature_list = np.array(object_feature_list)  # T,V,C
-    object_frame_feature = np.zeros((num_visible_object, end_ind-start_ind, total_feature_dimension))
-    object_frame_feature = np.transpose(object_feature_list, (1,0,2))
-    '''
-    return object_features, neighbor_matrix, mean_xy, inst_sample_tokens
+    assert object_feature_list.shape[1] < max_num_objects
+    object_frame_feature = np.zeros((max_num_objects, end_frame-start_frame, total_feature_dimension))  # V, T, C
+    object_frame_feature[:num_visible_object] = np.transpose(object_feature_list, (1,0,2))
+    inst_sample_tokens = np.column_stack((tracks[current_frame]['node_id'], tracks[current_frame]['sample_token']))
+    #visible_object_indexes = [list(now_all_object_id).index(i) for i in visible_node_id_list]
+    return object_frame_feature, neighbor_matrix, mean_xy, inst_sample_tokens
 
 
 def process_scene(scene):
@@ -312,17 +320,18 @@ def process_scene(scene):
     visible_object_indexes_list=[]
     step=2 #iterate over 1s
     for start_ind in frame_id_list[:-total_frames+1:step]:
-        current_frame = start_ind + history_frames
-        object_frame_feature, neighbor_matrix, mean_xy, inst_sample_tokens = process_tracks(tracks[current_frame], current_frame)  
+        current_frame = start_ind + history_frames -1
+        end_ind = start_ind + total_frames
+        object_frame_feature, neighbor_matrix, mean_xy, inst_sample_tokens = process_tracks(tracks, start_ind, end_ind, current_frame)  
         #print(f"Processed sequence with current frame {current_frame}")
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
         all_mean_list.append(mean_xy)
         tokens_list.append(inst_sample_tokens)
 
-    all_adjacency = np.array(all_adjacency_list, dtype=object)
+    all_adjacency = np.array(all_adjacency_list)
     all_mean = np.array(all_mean_list)                            
-    all_feature = np.array(all_feature_list, dtype=object)
+    all_feature = np.array(all_feature_list)
     tokens = np.array(tokens_list, dtype=object)
     return all_feature, all_adjacency, all_mean, tokens
 
@@ -378,14 +387,14 @@ for data_class in ['train', 'val', 'test']:
         all_tokens.extend(tokens_sc)
         #scenes_df.append(scene_df)
         #scene_df.to_csv(os.path.join('./nuscenes_processed/', nuscenes.get('scene', scene_token)['name'] + '.csv'))
-    all_data = np.array(all_data, dtype=object)  
-    all_adjacency = np.array(all_adjacency, dtype=object) 
+    all_data = np.array(all_data)  
+    all_adjacency = np.array(all_adjacency) 
     all_mean_xy = np.array(all_mean_xy) 
-    all_tokens = np.array(all_tokens, dtype=object)
-    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_' + data_class + '.pkl'
+    all_tokens = np.array(all_tokens)
+    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_' + data_class + '.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
-    print(f'Processed {all_data.shape[0]} sequences and {len(ns_scene_names[data_class])} scenes.')
+    print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
 
 
 '''
