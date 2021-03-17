@@ -20,7 +20,7 @@ from argparse import ArgumentParser, Namespace
 import math
 from torch.distributions.kl import kl_divergence
 from torch.distributions.normal import Normal
-
+from utils import str2bool, compute_change_pos
 
 FREQUENCY = 2
 dt = 1 / FREQUENCY
@@ -29,26 +29,10 @@ future = 6
 history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
-input_dim_model = history_frames*2 + 7 #Input features to the model: x,y-global (zero-centralized), heading, history relative_positions (4fx2), vel, accel, heading_rate, type 
+input_dim_model = history_frames*7 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
 
-default_config = {
-            "ew_dims":2,
-            "lr":1e-5,
-            "batch_size": 1,
-            "hidden_dims": 512,
-            "z_dims": 128,
-            "dropout": 0.1,
-            "beta": 1,
-            "delta": 1,
-            "feat_drop": 0.,
-            "attn_drop":0.25,
-            "bn":False,
-            "wd": 0.01,
-            "heads": 2,
-            "att_ew": True,    
-            'embedding':True
-        }
+
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -142,64 +126,18 @@ class LitGNN(pl.LightningModule):
         return loss, {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KL':kld_loss}
   
 
-    def check_overlap(self, preds):
-        intersect=[]
-        #y_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,1].detach().cpu().numpy()-preds[j,:,1].detach().cpu().numpy()))).size > 0  for i in range(len(preds)-1) for j in range(i+1,len(preds))]
-        #x_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,0].detach().cpu().numpy()-preds[j,:,0].detach().cpu().numpy()[::-1]))).size > 0 for i in range(len(preds)-1)  for j in range(i+1,len(preds))]
-        #intersect = [True if y and x else False for y,x in zip(y_intersect,x_intersect)]
-        '''
-        for i in range(len(preds)-1):
-            for j in range(i+1,len(preds)):
-                y_intersect=(torch.sign(preds[i,:,1]-preds[j,:,1])-torch.sign(preds[i,:,1]-preds[j,:,1])[0]).bool().any()  #True if non all-zero
-                x_intersect=(torch.sign(preds[i,:,0]-reversed(preds[j,:,0]))-torch.sign(preds[i,:,0]-reversed(preds[j,:,0]))[0]).bool().any()
-                intersect.append(True if y_intersect and x_intersect else False)
-        '''
-        y_sub = torch.cat([torch.sign(preds[i:-1,:,1]-preds[i+1:,:,1]) for i in range(len(preds)-1)])  #N(all combinations),6
-        y_intersect=( y_sub - y_sub[:,0].view(len(y_sub),-1)).bool().any(dim=1) #True if non all-zero (change sign)
-        x_sub = torch.cat([torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0])) for i in range(len(preds)-1)])
-        x_intersect = (x_sub -x_sub[:,0].view(len(x_sub),-1)).bool().any(dim=1)
-        #x_intersect=torch.cat([(torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0]))-torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0]))[0]).bool().any(dim=1) for i in range(len(preds)-1)])
-        intersect = torch.logical_and(y_intersect,x_intersect) #[torch.count_nonzero(torch.logical_and(y,x))/len(x) for y,x in zip(y_intersect,x_intersect)] #to intersect, both True
-        return torch.count_nonzero(intersect)/len(intersect) #percentage of intersections between all combinations
-        #y_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,1].cpu()-preds[j,:,1].cpu()))).size > 0 for j in range(i+1,len(preds)) for i in range(len(preds)-1)]
-
-    def compute_change_pos(self, feats,gt, scale_factor):
-        gt_vel = gt.clone()  #.detach().clone()
-        feats_vel = feats[:,:,:2].clone()
-        new_mask_feats = (feats_vel[:, 1:]!=0) * (feats_vel[:, :-1]!=0) 
-        new_mask_gt = (gt_vel[:, 1:]!=0) * (gt_vel[:, :-1]!=0) 
-            
-        rescale_xy=torch.ones((1,1,2), device=self.device)*scale_factor
-
-        gt_vel[:, 1:] = (gt_vel[:, 1:] - gt_vel[:, :-1]) * new_mask_gt
-        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]*rescale_xy) * new_mask_gt[:,0:1]
-        feats_vel[:, 1:] = (feats_vel[:, 1:] - feats_vel[:, :-1]) * new_mask_feats
-        feats_vel[:, 0] = 0
-        
-        return feats_vel, gt_vel
-
-    def compute_long_lat_error(self,pred,gt,mask):
-        pred = pred*mask #B*V,T,C  (B n grafos en el batch)
-        gt = gt*mask  # outputmask BV,T,C
-        lateral_error = pred[:,:,0]-gt[:,:,0]
-        long_error = pred[:,:,1] - gt[:,:,1]  #BV,T
-        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
-        return lateral_error, long_error, overall_num
-
-    
     
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = train_batch
-        
-        
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
+        _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, labels)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
-        labels=labels.view(labels.shape[0],self.future_frames,-1)
+        
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta)
 
         self.log_dict({f"Sweep/train_{k}": v for k,v in logs.items()}, on_step=False, on_epoch=True)
@@ -207,15 +145,14 @@ class LitGNN(pl.LightningModule):
 
 
     def validation_step(self, val_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels = val_batch
-
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = val_batch
+        _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
         e_w = batched_graph.edata['w']
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
         
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
-        labels=labels.view(labels.shape[0],self.future_frames,-1)
         
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='mse')
 
@@ -237,9 +174,6 @@ class LitGNN(pl.LightningModule):
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
-        
-        # Reshape from (B*V,T,C) to (B*V,T*C) 
-        feats = feats.contiguous().view(feats.shape[0],-1)
         
         ade = []
         fde = []         
@@ -279,9 +213,9 @@ def main(args: Namespace):
 
     seed=seed_everything(np.random.randint(1000000))
 
-    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
-    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
+    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_train.pkl', train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
+    val_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_val.pkl', train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
+    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
@@ -304,10 +238,10 @@ def main(args: Namespace):
         else:
             ckpt_folder = run.name
         checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/', ckpt_folder))
-        trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     else:
         checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/',filename='nowandb-{epoch:02d}.ckpt')
-        trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
+        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
 
     
     print('Best lr: ', LitGNN_sys.lr)
@@ -324,7 +258,7 @@ if __name__ == '__main__':
 
     parser = ArgumentParser()
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
-    parser.add_argument("--scale_factor", type=int, default=1, help="Wether to scale x,y global positions (zero-centralized)")
+    parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
@@ -339,7 +273,8 @@ if __name__ == '__main__':
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument("--beta", type=float, default=1.0, help='Weighting factor of the KL divergence loss term')
     parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
-    parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
+    #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
+    parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
     parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')   
 
     
