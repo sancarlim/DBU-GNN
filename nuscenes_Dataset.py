@@ -23,6 +23,8 @@ future = 6
 history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
+max_num_objects = 150 
+total_feature_dimension = 14 
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -41,7 +43,7 @@ def collate_batch(samples):
 
 class nuscenes_Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val_test, history_frames, future_frames, rel_types=True):
+    def __init__(self, raw_dir, train_val_test='train', history_frames=history_frames, future_frames=future_frames, rel_types=True):
         '''
             :classes:   categories to take into account
             :rel_types: wether to include relationship types in edge features 
@@ -49,30 +51,24 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.train_val_test=train_val_test
         self.history_frames = history_frames
         self.future_frames = future_frames
-        self.total_frames = history_frames + future_frames
         self.types = rel_types
-
-        if self.train_val_test == 'train':
-            self.raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_train.pkl'
-        elif self.train_val_test == 'val':  
-            self.raw_dir ='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_val.pkl'  
-        else:
-            self.raw_dir ='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_test.pkl'  
-
+        self.raw_dir = raw_dir 
+        
         self.load_data()
         self.process()        
 
     def load_data(self):
         with open(self.raw_dir, 'rb') as reader:
-            [self.all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
+            [all_feature, self.all_adjacency, self.all_mean_xy, self.all_tokens]= pickle.load(reader)
+        self.all_feature=torch.from_numpy(all_feature).type(torch.float32)
 
     def process(self):
         '''
         INPUT:
-            :all_feature:   x,y_global (zero centralized per sequence), heading, vel, accel, heading_chang_rate, past_xy_local (4f*2), future_xy_local(12f*2), 
-                                    mask(12f), type, l,w,h, frame_id, scene_id ---> (58) 
+            :all_feature:   x,y (global zero-centralized),heading,vel,acc,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects (14)
             :all_mean_xy:   mean_xy per sequence for zero centralization
             :all_adjacency: Adjacency matrix per sequence for building graph
+            :all_tokens:    Instance token, scene token
         RETURNS:
             :node_feats :  x_y_global, past_x_y, heading,vel,accel,heading_change_rate, type (2+8+5 = 15 in_features)
             :node_labels:  future_xy_local (24)
@@ -83,26 +79,27 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         total_num = len(self.all_feature)
         print(f"{self.train_val_test} split has {total_num} sequences.")
         now_history_frame=self.history_frames-1
-        self.feature_id = list(range(0,14)) + [-8] 
-        self.labels_id = list(range(14,38))
-        self.mask_id = list(range(38,50))
+        feature_id = list(range(0,7))
+        self.track_info = self.all_feature[:,:,:,11:13]
+        self.object_type = self.all_feature[:,:,now_history_frame,6].int()
+        self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()
+        self.output_mask= self.all_feature[:,:,self.history_frames:,-2].unsqueeze_(-1)
         
-        #rescale_xy=torch.ones((1,1,1,2))
-        #rescale_xy[:,:,0] = torch.max(abs(self.all_feature[:,:,:,0]))  #121 
-        #rescale_xy[:,:,1] = torch.max(abs(self.all_feature[:,:,:,1]))   #77   
-        #rescale_xy=torch.ones((1,1,2))*10
-        #self.all_feature[:,:now_history_frame+1,:2] = self.all_feature[:,:now_history_frame+1,:2]/rescale_xy
+        #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,0]))  
+        #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,1]))  
+        rescale_xy=torch.ones((1,1,1,2))*10
+        self.all_feature[:,:,:self.history_frames,:2] = self.all_feature[:,:,:self.history_frames,:2]/rescale_xy
+        self.node_features = self.all_feature[:,:,:self.history_frames,feature_id]
+        self.node_labels = self.all_feature[:,:,self.history_frames:,:2]
 
-        self.xy_dist=[spatial.distance.cdist(self.all_feature[i][:,:2], self.all_feature[i][:,:2]) for i in range(len(self.all_feature))]  #NxV_ixV_i
+        self.xy_dist=[spatial.distance.cdist(self.all_feature[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70
         
-
     def __len__(self):
             return len(self.all_feature)
 
     def __getitem__(self, idx):
-        object_type = torch.tensor(self.all_feature[idx][:,-8], dtype=torch.int)
-        graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx])).int()
-
+        graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.num_visible_object[idx],:self.num_visible_object[idx]])).int()
+        object_type = self.object_type[idx,:self.num_visible_object[idx]]
         # Compute relation types
         edges_uvs=[np.array([graph.edges()[0][i].numpy(),graph.edges()[1][i].numpy()]) for i in range(graph.num_edges())]
         rel_types = [torch.zeros(1, dtype=torch.int) if u==v else (object_type[u]*object_type[v]) for u,v in edges_uvs]
@@ -119,15 +116,15 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
             graph.edata['w'] = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
 
 
-        feats = torch.tensor(self.all_feature[idx][:,self.feature_id], dtype=torch.float32)
-        gt = torch.tensor(self.all_feature[idx][:,self.labels_id], dtype=torch.float32)
-        output_mask = torch.tensor(self.all_feature[idx][:,self.mask_id], dtype=torch.int32).unsqueeze(-1)
+        feats = self.node_features[idx, :self.num_visible_object[idx]]
+        gt = self.node_labels[idx, :self.num_visible_object[idx]]
+        output_mask = self.output_mask[idx, :self.num_visible_object[idx]]
         
         return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(train_val_test='train', history_frames=history_frames, future_frames=future_frames)  #3509
+    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_train.pkl', train_val_test='train')  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
     train_dataloader=iter(DataLoader(train_dataset, batch_size=25, shuffle=False, collate_fn=collate_batch) )
     while(1):
