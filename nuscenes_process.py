@@ -163,7 +163,8 @@ def process_tracks(tracks, start_frame, end_frame, current_frame):
     '''
     ########## Retrieve features and labels for each agent 
 
-    ''' FIRST OPTION 
+    ''' 
+    ############# FIRST OPTION ############
     # Get past and future trajectories
     future_xy_local = np.zeros((num_visible_object, future_frames*2))
     past_xy_local = np.zeros((num_visible_object, 2*history_frames))
@@ -182,7 +183,7 @@ def process_tracks(tracks, start_frame, end_frame, current_frame):
     inst_sample_tokens = np.column_stack((track['node_id'], track['sample_token']))
     '''
 
-    ######## SECOND OPTION (like inD)
+    ############ SECOND OPTION ###############3
     now_all_object_id = set([val for frame in range(start_frame, end_frame) for val in tracks[frame]["node_id"]])  #todos los obj en los15 hist frames
     non_visible_object_id_list = list(now_all_object_id - set(visible_node_id_list))  #obj en alguno de los 15 frames pero no el ultimo
     total_num = len(now_all_object_id)
@@ -440,9 +441,6 @@ past_xy_global = helper.get_past_for_sample(sample_token, seconds=3, in_agent_fr
 # 1. Iterate over all scenes (train and val)
 # 2. Iterate over each sample
 # 3. Iterate over N instances (objects) in each sample
-#       3.1. Filter category and save: category, instance_token (node_id), frame
-#       3.2. Get past and future trajectories (local frame) and CURRENT: x,y (global frame), heading, velocity, acceleration and heading_change_rate
-#
 # df_scenes: list of 475 dataframes (475 scenes) (train) 
 #     Each dataframe: 40 samples (keyframes)
-#          Each sample: N instances ~43
+#          Each sample: N instances
