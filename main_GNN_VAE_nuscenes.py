@@ -89,7 +89,7 @@ class LitGNN(pl.LightningModule):
         return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, collate_fn=collate_batch)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=512, shuffle=False, num_workers=12, collate_fn=collate_batch) 
+        return DataLoader(self.test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
     
     def compute_RMSE(self,pred, gt, mask): 
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
@@ -168,7 +168,7 @@ class LitGNN(pl.LightningModule):
          
     def test_step(self, test_batch, batch_idx):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = test_batch
-        rescale_xy=torch.ones((1,1,2), device=self.device)*10
+        rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
         last_loc = last_loc*rescale_xy       
         e_w = batched_graph.edata['w'].float()
@@ -211,7 +211,7 @@ def main(args: Namespace):
     # keep track of parameters in logs
     print(args)
 
-    seed=seed_everything(np.random.randint(1000000))
+    seed=seed_everything(0)
 
     train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_train.pkl', train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
     val_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_val.pkl', train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
@@ -229,7 +229,7 @@ def main(args: Namespace):
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=3)
 
     if not args.nowandb:
-        run=wandb.init(project="nuscenes", entity="sandracl72", job_type="training")  
+        run=wandb.init(job_type="training")  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
         #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
@@ -244,14 +244,21 @@ def main(args: Namespace):
         trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
 
     
-    print('Best lr: ', LitGNN_sys.lr)
-    print('GPU Nº: ', device)
-    print("############### TRAIN ####################")
-    trainer.fit(LitGNN_sys)
-    print('Model checkpoint path:',trainer.checkpoint_callback.best_model_path)
-    
-    print("############### TEST ####################")
-    trainer.test(ckpt_path='best')
+    if args.ckpt is not None:
+        LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, history_frames=history_frames, future_frames= future_frames,
+                     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+        print('############ TEST  ##############')
+        trainer = pl.Trainer(gpus=1, profiler=True)
+        trainer.test(LitGNN_sys)
+    else:
+        print('Best lr: ', LitGNN_sys.lr)
+        print('GPU Nº: ', device)
+        print("############### TRAIN ####################")
+        trainer.fit(LitGNN_sys)
+        print('Model checkpoint path:',trainer.checkpoint_callback.best_model_path)
+        
+        print("############### TEST ####################")
+        trainer.test(ckpt_path='best')
 
 
 if __name__ == '__main__':
@@ -263,9 +270,9 @@ if __name__ == '__main__':
     parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
     parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
-    parser.add_argument("--z_dims", type=int, default=100, help="Dimensionality of the latent space")
+    parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
     parser.add_argument("--hidden_dims", type=int, default=512)
-    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
+    parser.add_argument("--model_type", type=str, default='vae_gated', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
@@ -275,7 +282,8 @@ if __name__ == '__main__':
     parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
     #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
-    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')   
+    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')  
+    parser.add_argument('--ckpt', type=str, default=None, help='ckpt path for only testing.')   
 
     
     device=os.environ.get('CUDA_VISIBLE_DEVICES')
@@ -283,4 +291,3 @@ if __name__ == '__main__':
 
     main(hparams)
 
-    main()    

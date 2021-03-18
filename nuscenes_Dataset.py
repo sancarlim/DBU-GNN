@@ -43,7 +43,7 @@ def collate_batch(samples):
 
 class nuscenes_Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, raw_dir, train_val_test='train', history_frames=history_frames, future_frames=future_frames, rel_types=True):
+    def __init__(self, raw_dir, train_val_test='train', history_frames=history_frames, future_frames=future_frames, rel_types=True, challenge_eval=False):
         '''
             :classes:   categories to take into account
             :rel_types: wether to include relationship types in edge features 
@@ -53,7 +53,8 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.future_frames = future_frames
         self.types = rel_types
         self.raw_dir = raw_dir 
-        
+        self.challenge_eval = challenge_eval
+
         self.load_data()
         self.process()        
 
@@ -119,8 +120,11 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         feats = self.node_features[idx, :self.num_visible_object[idx]]
         gt = self.node_labels[idx, :self.num_visible_object[idx]]
         output_mask = self.output_mask[idx, :self.num_visible_object[idx]]
-        
-        return graph, output_mask, feats, gt
+
+        if self.challenge_eval:
+            return graph, output_mask, feats, gt, self.all_tokens[idx], self.all_mean_xy[idx]
+        else:        
+            return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
     
