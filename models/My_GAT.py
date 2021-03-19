@@ -154,16 +154,11 @@ class My_GATLayer(nn.Module):
       
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        gain = nn.init.calculate_gain('relu')
         
         nn.init.kaiming_normal_(self.linear_self.weight, nonlinearity='relu')
         nn.init.kaiming_normal_(self.linear_func.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.attention_func.weight, nonlinearity='leaky_relu')
-        '''
-        nn.init.xavier_normal_(self.linear_self.weight, gain=gain)
-        nn.init.xavier_normal_(self.linear_func.weight, gain=gain)
-        nn.init.xavier_normal_(self.attention_func.weight, gain=nn.init.calculate_gain('leaky_relu',0.01))
-        '''
+        nn.init.kaiming_normal_(self.attention_func.weight, a=0.01, nonlinearity='leaky_relu')
+        
     
     def edge_attention(self, edges):
         concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=-1) #(n_edg,hid)||(n_edg,hid) -> (n_edg,2*hid) 
@@ -224,10 +219,11 @@ class MultiHeadGATLayer(nn.Module):
     
 class My_GAT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True, ew_type=False):
         super().__init__()
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
         self.embedding_e = nn.Linear(1, hidden_dim)
+        self.embedding_e = nn.Linear(2, hidden_dim) if  ew_type else nn.Linear(1, hidden_dim)
         self.heads = heads
         if heads == 1:
             self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
@@ -235,7 +231,7 @@ class My_GAT(nn.Module):
             self.linear1 = nn.Linear(hidden_dim, output_dim)          
         else:
             self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, merge='average', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
+            self.embedding_e2 = nn.Linear(2, hidden_dim*heads) if ew_type else nn.Linear(1, hidden_dim*heads)
             self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, merge='cat', res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
 
@@ -249,9 +245,9 @@ class My_GAT(nn.Module):
         """Reinitialize learnable parameters."""
         gain = nn.init.calculate_gain('relu')
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.linear1.weight)  #Aquí ya no hay no linearlidad
+        nn.init.kaiming_normal_(self.linear1.weight, nonlinearity='relu')
         nn.init.xavier_normal_(self.embedding_e.weight)       
-        if self.heads == 3:
+        if self.heads > 1:
             nn.init.xavier_normal_(self.embedding_e2.weight)
     
     def forward(self, g, feats,e_w,snorm_n,snorm_e):
