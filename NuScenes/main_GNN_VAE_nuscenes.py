@@ -89,7 +89,7 @@ class LitGNN(pl.LightningModule):
         return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, collate_fn=collate_batch)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
+        return DataLoader(self.test_dataset, batch_size=16, shuffle=False, num_workers=12, collate_fn=collate_batch) 
     
     def compute_RMSE(self,pred, gt, mask): 
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
@@ -179,7 +179,7 @@ class LitGNN(pl.LightningModule):
         fde = []         
         #En test batch=1 secuencia con n agentes
         #Para el most-likely coger el modo con pi mayor de los 3 y o bien coger muestra de la media 
-        for i in range(10): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
+        for i in range(5): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
             #Model predicts relative_positions
             preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e)
             preds=preds.view(preds.shape[0],self.future_frames,-1)
@@ -194,8 +194,8 @@ class LitGNN(pl.LightningModule):
             fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
             if torch.isnan(fde_s):  #visible pero no tiene datos para los siguientes 6 frames
                 print('stop')
-                fde_s[np.isnan(fde_s)]=0
-                ade_ts[np.isnan(ade_ts)]=0
+                fde_s[torch.isnan(fde_s)]=0
+                ade_ts[torch.isnan(ade_ts)]=0
                 for j in range(self.future_frames-2,-1,-1):
                     if ade_ts[j] != 0:
                             fde_s =  torch.sum((x2y2_error**0.5), dim=0)[j] / torch.sum(overall_num, dim=0)[j]  #compute FDE with the last frame with data
@@ -238,10 +238,10 @@ def main(args: Namespace):
         else:
             ckpt_folder = run.name
         checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/', ckpt_folder))
-        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=False, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
     else:
         checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/',filename='nowandb-{epoch:02d}.ckpt')
-        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
+        trainer = pl.Trainer( weights_summary='full', gpus=args.gpus, deterministic=False, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
 
     
     if args.ckpt is not None:
@@ -271,8 +271,8 @@ if __name__ == '__main__':
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
     parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
     parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=512)
-    parser.add_argument("--model_type", type=str, default='vae_gated', help="Choose aggregation function between GAT or GATED",
+    parser.add_argument("--hidden_dims", type=int, default=1024)
+    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)

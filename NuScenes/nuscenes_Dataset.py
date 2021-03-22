@@ -80,7 +80,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         total_num = len(self.all_feature)
         print(f"{self.train_val_test} split has {total_num} sequences.")
         now_history_frame=self.history_frames-1
-        feature_id = list(range(0,7))
+        feature_id = list(range(0,7)) #+ [6]
         self.track_info = self.all_feature[:,:,:,11:13]
         self.object_type = self.all_feature[:,:,now_history_frame,6].int()
         self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()
@@ -122,13 +122,13 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         output_mask = self.output_mask[idx, :self.num_visible_object[idx]]
 
         if self.challenge_eval:
-            return graph, output_mask, feats, gt, self.all_tokens[idx], self.all_mean_xy[idx]
+            return graph, output_mask, feats, gt, self.all_tokens[idx], self.all_mean_xy[idx,:2]
         else:        
             return graph, output_mask, feats, gt
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_train.pkl', train_val_test='train')  #3509
+    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', challenge_eval=True)  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
     train_dataloader=iter(DataLoader(train_dataset, batch_size=25, shuffle=False, collate_fn=collate_batch) )
     while(1):

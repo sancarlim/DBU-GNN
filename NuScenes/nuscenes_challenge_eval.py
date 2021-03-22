@@ -16,6 +16,8 @@ from utils import str2bool, compute_change_pos
 from nuscenes.eval.prediction.data_classes import Prediction
 import json
 
+from torchvision import transforms, utils
+
 FREQUENCY = 2
 dt = 1 / FREQUENCY
 history = 2
@@ -39,7 +41,7 @@ def collate_batch(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt, tokens, mean_xy
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt, tokens[0], mean_xy
 
 
 
@@ -92,18 +94,23 @@ class LitGNN(pl.LightningModule):
             preds += last_loc
 
             # Provide predictions in global-coordinates
-            preds = preds + mean_xy
+            pred_x = preds[:,:,0].cpu().numpy() + mean_xy[0][0]  # [N_agents, T]
+            pred_y = preds[:,:,1].cpu().numpy() + mean_xy[0][1]
+            
+            prediction_all_agents.append(np.stack([pred_x, pred_y],axis=-1))
 
-            prediction_all_agents.append(preds)
-
+        prediction_all_agents = np.array(prediction_all_agents)
         eval_preds = []
         for token in tokens_eval:
-            idx = np.where(np.array(tokens_eval)==token)
-            instance, sample = token.split("_")
-            eval_preds.append(Prediction(instance, sample, np.expand_dims(prediction_all_agents[:,idx], 0), np.array([1/25])))  #need the pred to have 2d
+            idx = np.where(np.array(tokens_eval)== token[0])[0][0]
+            instance, sample = token
+            img = mtp_input_representation.make_input_representation(instance, sample) #Esto habría que hacerlo en process y guardar las imagenes.
+            plt.imshow(img)
+            eval_preds.append(Prediction(str(instance), str(sample), prediction_all_agents[:,idx], np.ones(25)*1/25))  #need the pred to have 2d
         
         challenge_predictions = [prediction.serialize() for prediction in eval_preds]
-        json.dump(challenge_predictions, open(f"{nuscenes}_inference.json"), "w")
+        with open("./nuscenes_inference.json", "a") as f:
+            json.dump(challenge_predictions, f)
 
    
 def main(args: Namespace):
@@ -111,7 +118,8 @@ def main(args: Namespace):
 
     seed=seed_everything(0)
 
-    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
+    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', 
+                    rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, challenge_eval=True)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
@@ -124,8 +132,9 @@ def main(args: Namespace):
     trainer = pl.Trainer(gpus=args.gpus, deterministic=True, precision=16, profiler=True) 
  
     LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, history_frames=history_frames, future_frames= future_frames,
-                    train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+                    train_dataset=None, val_dataset=None, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
 
+    
     trainer.test(LitGNN_sys)
    
 
@@ -136,8 +145,8 @@ if __name__ == '__main__':
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
     parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=512)
-    parser.add_argument("--model_type", type=str, default='vae_gated', help="Choose aggregation function between GAT or GATED",
+    parser.add_argument("--hidden_dims", type=int, default=768)
+    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
@@ -145,7 +154,7 @@ if __name__ == '__main__':
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
     parser.add_argument('--ckpt', type=str, default=None, help='ckpt path.')   
-
+    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')
     
     device=os.environ.get('CUDA_VISIBLE_DEVICES')
     hparams = parser.parse_args()
