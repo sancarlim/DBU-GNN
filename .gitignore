@@ -160,3 +160,7 @@ trained_models/log_test.txt
 prediction_result.txt
 main_grip.py
 main_grip.py
+*.png
+*.jpg
+*.pdf
+*.ckpt

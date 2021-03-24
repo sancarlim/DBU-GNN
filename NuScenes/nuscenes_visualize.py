@@ -3,20 +3,33 @@ import dgl
 import torch
 from torch.utils.data import DataLoader
 import os
+import sys
+sys.path.append('../../DBU_Graph')
 os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 from nuscenes_Dataset import nuscenes_Dataset
 from models.VAE_GNN import VAE_GNN
 #from VAE_GATED import VAE_GATED
-import wandb
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from argparse import ArgumentParser, Namespace
 from utils import str2bool, compute_change_pos
 from nuscenes.eval.prediction.data_classes import Prediction
 import json
-
 from torchvision import transforms, utils
+from nuscenes import NuScenes
+from nuscenes.map_expansion.map_api import NuScenesMap
+import math
+import seaborn as sns
+from PIL import Image
+import matplotlib.pyplot as plt
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import matplotlib.patheffects as pe
+from nuscenes.prediction import PredictHelper
+from pyquaternion import Quaternion
+from nuscenes.eval.common.utils import quaternion_yaw, angle_diff
+
+from scipy.ndimage import rotate
 
 FREQUENCY = 2
 dt = 1 / FREQUENCY
@@ -28,6 +41,30 @@ total_frames = history_frames + future_frames #2s of history + 6s of prediction
 input_dim_model = history_frames*7 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
 base_path='/home/sandra/PROGRAMAS/DBU_Graph/NuScenes'
+DATAROOT = '/home/sandra/PROGRAMAS/raw_data/nuscenes'
+nuscenes = NuScenes('v1.0-mini', dataroot=DATAROOT)   #850 scenes
+
+helper = PredictHelper(nuscenes)
+
+layers = ['drivable_area',
+          'road_segment',
+          'lane',
+          'ped_crossing',
+          'walkway',
+          'stop_line',
+          'carpark_area',
+          'stop_line',
+          'road_divider',
+          'lane_divider']
+#layers=nusc_map.non_geometric_layers
+
+line_colors = ['#375397', '#F05F78', '#80CBE5', '#ABCB51', '#C8B0B0']
+
+cars = [plt.imread('NuScenes/icons/Car TOP_VIEW 375397.png'),
+        plt.imread('NuScenes/icons/Car TOP_VIEW F05F78.png'),
+        plt.imread('NuScenes/icons/Car TOP_VIEW 80CBE5.png'),
+        plt.imread('NuScenes/icons/Car TOP_VIEW ABCB51.png'),
+        plt.imread('NuScenes/icons/Car TOP_VIEW C8B0B0.png')]
 
 scene_blacklist = [499, 515, 517]
 
@@ -150,35 +187,73 @@ class LitGNN(pl.LightningModule):
             max_patch = center_patch + diff_patch / 2
         my_patch = (min_patch[0], min_patch[1], max_patch[0], max_patch[1])
         
-        fig, ax = nusc_map.render_map_patch(my_patch, nusc_map.non_geometric_layers, figsize=(10, 10), alpha=0.3,
+        fig, ax = nusc_map.render_map_patch(my_patch, layers, figsize=(10, 10), alpha=0.3,
                                     render_egoposes_range=False,
                                     render_legend=True, bitmap=None)
 
         #Print agents trajectories
-
+        i = 0
         for token in tokens_eval:
-            idx = np.where(np.array(tokens_eval)== token[0])[0][0]
+            idx = np.where(np.array(tokens_eval)== token[0])[0][0]  #idx ordered checked
             instance, sample_token = token
+            annotation = helper.get_sample_annotation(instance, sample_token)
+            category = annotation['category_name'].split('.')[0]
+            attribute = nuscenes.get('attribute', annotation['attribute_tokens'][0])['name']
+
+
             prediction = prediction_all_agents[:,idx]
-            history = feats[idx]
-            future = labels_pos[idx]
+            history = feats[idx,:,:2].detach().clone()
+            #remove zero rows (no data in those frames) and rescale to obtain global coords.
+            history = (history[history.all(axis=1)]*rescale_xy + mean_xy[0]).squeeze() 
+            future = labels_pos[idx] 
+            future = future[future.all(axis=1)] + mean_xy[0]
+            if len(history.shape) < 2:
+                history=np.vstack([history, history])
+            if future.size()[0] == 1:
+                future=np.vstack([future, future])
 
             # Plot predictions
-            for t in range(prediction.shape[1]):
-                sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
-                    ax=ax, shade=True, thresh=0.05, 
-                    color='b', zorder=600, alpha=0.8)
+            if category != 'vehicle':
+                if 'sitting_lying_down' not in attribute:
+                    for t in range(prediction.shape[1]):
+                        try:
+                            sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
+                                ax=ax, shade=True, thresh=0.05, 
+                                color='b', zorder=600, alpha=0.8)
+                        except:
+                            print('2-th leading minor of the array is not positive definite')
+                            continue
+
+            else:  
+                if 'parked' not in attribute:
+                    for t in range(prediction.shape[1]):
+                        try:
+                            sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
+                                ax=ax, shade=True, thresh=0.05, 
+                                color='b', zorder=600, alpha=0.8)
+                        except:
+                            print('2-th leading minor of the array is not positive definite')
+                            continue
+
+                
+                r_img = rotate(cars[i % len(cars)], quaternion_yaw(Quaternion(annotation['rotation']))*180/math.pi,reshape=True)
+                oi = OffsetImage(r_img, zoom=0.01, zorder=700)
+                veh_box = AnnotationBbox(oi, (history[-1, 0], history[-1, 1]), frameon=False)
+                veh_box.zorder = 700
+                ax.add_artist(veh_box)
+                i += 1
 
             #Plot history
             ax.plot(history[:, 0], history[:, 1], 'k--')
-
             #Plot ground truth
-            ax.plot(future[:, 0],
-                    future[:, 1],
-                    'w--',
-                    zorder=650,
-                    path_effects=[pe.Stroke(linewidth=2, foreground='k'), pe.Normal()])
-            
+            if future.shape[0] > 0:
+                ax.plot(future[:, 0],
+                        future[:, 1],
+                        'w--',
+                        label='Ground Truth',
+                        zorder=650,
+                        path_effects=[pe.Stroke(linewidth=2, foreground='k'), pe.Normal()])
+                
             # Current Node Position
             node_circle_size=0.3
             circle_edge_width=0.5
@@ -191,8 +266,8 @@ class LitGNN(pl.LightningModule):
                                 zorder=3)
             ax.add_artist(circle)
         
-        ax.axis('off')
-        fig.savefig(os.path.join(base_path, 'visualizations' , scene_id + '.pdf'), dpi=300, bbox_inches='tight')
+        #ax.axis('off')
+        fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
 
 
    
@@ -212,7 +287,7 @@ def main(args: Namespace):
     LitGNN_sys = LitGNN(model=model, history_frames=history_frames, future_frames= future_frames, train_dataset=None, val_dataset=None,
                  test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
       
-    trainer = pl.Trainer(gpus=args.gpus, deterministic=True, precision=16, profiler=True) 
+    trainer = pl.Trainer(gpus=0, deterministic=True,  profiler=True) 
  
     LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, history_frames=history_frames, future_frames= future_frames,
                     train_dataset=None, val_dataset=None, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
@@ -237,9 +312,8 @@ if __name__ == '__main__':
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
     parser.add_argument('--ckpt', type=str, default=None, help='ckpt path.')   
-    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')
+    parser.add_argument('--nowandb', action='store_true')
     
-    device=os.environ.get('CUDA_VISIBLE_DEVICES')
     hparams = parser.parse_args()
 
     main(hparams)
