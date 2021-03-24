@@ -1,6 +1,5 @@
 import numpy as np
 import dgl
-import random
 import pickle
 import math
 from scipy import spatial
@@ -24,7 +23,7 @@ history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
 max_num_objects = 150 
-total_feature_dimension = 14 
+total_feature_dimension = 16
 
 def collate_batch(samples):
     graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -66,7 +65,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
     def process(self):
         '''
         INPUT:
-            :all_feature:   x,y (global zero-centralized),heading,vel,acc,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects (14)
+            :all_feature:   x,y (global zero-centralized),heading,velx,vely,accx,accy,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects (14)
             :all_mean_xy:   mean_xy per sequence for zero centralization
             :all_adjacency: Adjacency matrix per sequence for building graph
             :all_tokens:    Instance token, scene token
@@ -80,9 +79,9 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         total_num = len(self.all_feature)
         print(f"{self.train_val_test} split has {total_num} sequences.")
         now_history_frame=self.history_frames-1
-        feature_id = list(range(0,7)) #+ [6]
-        self.track_info = self.all_feature[:,:,:,11:13]
-        self.object_type = self.all_feature[:,:,now_history_frame,6].int()
+        feature_id = list(range(0,9)) 
+        self.track_info = self.all_feature[:,:,:,13:15]
+        self.object_type = self.all_feature[:,:,now_history_frame,8].int()
         self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()
         self.output_mask= self.all_feature[:,:,self.history_frames:,-2].unsqueeze_(-1)
         
@@ -128,7 +127,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', challenge_eval=True)  #3509
+    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='train', challenge_eval=False)  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
     train_dataloader=iter(DataLoader(train_dataset, batch_size=25, shuffle=False, collate_fn=collate_batch) )
     while(1):

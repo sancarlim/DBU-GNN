@@ -23,7 +23,7 @@ from nuscenes.prediction.input_representation.combinators import Rasterizer
 scene_blacklist = [499, 515, 517]
 
 max_num_objects = 150 #To return np array 
-total_feature_dimension = 14 #x,y,heading,vel,acc,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects
+total_feature_dimension = 16 #x,y,heading,vel[x,y],acc[x,y],head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects
 
 FREQUENCY = 2
 dt = 1 / FREQUENCY
@@ -249,8 +249,10 @@ def process_scene(scene):
                                  'x_global',
                                  'y_global', 
                                  'heading',
-                                 'velocity',
-                                 'acceleration',
+                                 'vel_x',
+                                 'vel_y',
+                                 'acc_x',
+                                 'acc_y',
                                  'heading_change_rate',
                                  'length',
                                  'width',
@@ -293,8 +295,10 @@ def process_scene(scene):
                                     'x_global': annotation['translation'][0],
                                     'y_global': annotation['translation'][1],
                                     'heading': Quaternion(annotation['rotation']).yaw_pitch_roll[0],
-                                    'velocity': velocity,
-                                    'acceleration': acceleration,
+                                    'vel_x': velocity[0],
+                                    'vel_y': velocity[1],
+                                    'acc_x': acceleration[0],
+                                    'acc_y': acceleration[1],
                                     'heading_change_rate': heading_change_rate,
                                     'length': annotation['size'][0],
                                     'width': annotation['size'][1],
@@ -330,7 +334,7 @@ def process_scene(scene):
         track['info_sequence'] = np.stack([track["frame_id"],track["scene_id"]], axis=-1)
         track['info_agent'] = np.stack([track["type"],track["length"],track["width"],track["height"]], axis=-1)
         track["position"] = np.stack([track["x_global"], track["y_global"], track["heading"]], axis=-1)
-        track['motion'] = np.stack([track["velocity"], track["acceleration"], track["heading_change_rate"]], axis=-1)
+        track['motion'] = np.stack([track["vel_x"], track["vel_y"], track["acc_x"],track["acc_y"], track["heading_change_rate"]], axis=-1)
         track["bbox"] = calculate_rotated_bboxes(track["x_global"], track["y_global"],
                                                 track["length"], track["width"],
                                                 np.deg2rad(track["heading"]))

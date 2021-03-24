@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 import os
 os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
-from nuscenes_Dataset import nuscenes_Dataset
+from NuScenes.nuscenes_Dataset import nuscenes_Dataset
 from models.VAE_GNN import VAE_GNN
 from models.VAE_GATED import VAE_GATED
 import wandb
@@ -27,7 +27,7 @@ future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
 input_dim_model = history_frames*7 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
-
+base_path = '/home/sandra/PROGRAMAS/DBU_Graph/NuScenes'
 
 def collate_batch(samples):
     graphs, masks, feats, gt, tokens, mean_xy = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
@@ -55,6 +55,7 @@ class LitGNN(pl.LightningModule):
         self.test_dataset = test_dataset
         self.rel_types = rel_types
         self.scale_factor = scale_factor
+        self.challenge_predictions = []
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -100,17 +101,16 @@ class LitGNN(pl.LightningModule):
             prediction_all_agents.append(np.stack([pred_x, pred_y],axis=-1))
 
         prediction_all_agents = np.array(prediction_all_agents)
-        eval_preds = []
         for token in tokens_eval:
             idx = np.where(np.array(tokens_eval)== token[0])[0][0]
             instance, sample = token
-            img = mtp_input_representation.make_input_representation(instance, sample) #Esto habría que hacerlo en process y guardar las imagenes.
-            plt.imshow(img)
-            eval_preds.append(Prediction(str(instance), str(sample), prediction_all_agents[:,idx], np.ones(25)*1/25))  #need the pred to have 2d
-        
-        challenge_predictions = [prediction.serialize() for prediction in eval_preds]
-        with open("./nuscenes_inference.json", "a") as f:
-            json.dump(challenge_predictions, f)
+            #img = mtp_input_representation.make_input_representation(instance, sample) #Esto habría que hacerlo en process y guardar las imagenes.
+            #plt.imshow(img)
+            pred = Prediction(str(instance), str(sample), prediction_all_agents[:,idx], np.ones(25)*1/25)  #need the pred to have 2d
+            self.challenge_predictions.append(pred.serialize())
+    
+    def test_epoch_end(self, outputs):
+        json.dump(self.challenge_predictions, open(os.path.join(base_path, 'challenge_inference.json'),'w'))
 
    
 def main(args: Namespace):
@@ -118,7 +118,7 @@ def main(args: Namespace):
 
     seed=seed_everything(0)
 
-    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', 
+    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_mini_val.pkl', train_val_test='test', 
                     rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, challenge_eval=True)  #230
 
     if args.model_type == 'vae_gated':
