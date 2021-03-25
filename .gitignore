@@ -159,10 +159,12 @@ Graph_InitialTests.ipynb
 *workspace
 *.json
 *.txt
+*.yml
+*.yaml
+*.png   
 
 /GRIP/
 ApolloScape
 ApolloScape_process.py
-DBU_Graph.yml
-DBU_Graph_env.yaml
 models/GCN.py
+models/VAE_GNN.py

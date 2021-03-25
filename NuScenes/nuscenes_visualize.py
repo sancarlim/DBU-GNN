@@ -38,11 +38,11 @@ future = 6
 history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
-input_dim_model = history_frames*7 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
+input_dim_model = history_frames*9 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
-base_path='/home/sandra/PROGRAMAS/DBU_Graph/NuScenes'
-DATAROOT = '/home/sandra/PROGRAMAS/raw_data/nuscenes'
-nuscenes = NuScenes('v1.0-mini', dataroot=DATAROOT)   #850 scenes
+base_path='/media/14TBDISK/sandra/nuscenes_processed'
+DATAROOT = '/media/14TBDISK/nuscenes'
+nuscenes = NuScenes('v1.0-trainval', dataroot=DATAROOT)   #850 scenes
 
 helper = PredictHelper(nuscenes)
 
@@ -60,11 +60,11 @@ layers = ['drivable_area',
 
 line_colors = ['#375397', '#F05F78', '#80CBE5', '#ABCB51', '#C8B0B0']
 
-cars = [plt.imread('NuScenes/icons/Car TOP_VIEW 375397.png'),
-        plt.imread('NuScenes/icons/Car TOP_VIEW F05F78.png'),
-        plt.imread('NuScenes/icons/Car TOP_VIEW 80CBE5.png'),
-        plt.imread('NuScenes/icons/Car TOP_VIEW ABCB51.png'),
-        plt.imread('NuScenes/icons/Car TOP_VIEW C8B0B0.png')]
+cars = [plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW 375397.png'),
+        plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW F05F78.png'),
+        plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW 80CBE5.png'),
+        plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW ABCB51.png'),
+        plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW C8B0B0.png')]
 
 scene_blacklist = [499, 515, 517]
 
@@ -103,7 +103,8 @@ class LitGNN(pl.LightningModule):
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
-        pred = self.model(graph, feats,e_w,snorm_n,snorm_e)   
+        # in lightning, forward defines the prediction/inference actions
+        pred = self.model.inference(graph, feats,e_w,snorm_n,snorm_e)   
         return pred
     
     def configure_optimizers(self):
@@ -144,8 +145,7 @@ class LitGNN(pl.LightningModule):
             
             prediction_all_agents.append(np.stack([pred_x, pred_y],axis=-1))
 
-        prediction_all_agents = np.array(prediction_all_agents)
-        
+        prediction_all_agents = np.array(prediction_all_agents)        
         
         #VISUALIZE SEQUENCE
         #Get Scene from sample token ie current frame
@@ -202,14 +202,14 @@ class LitGNN(pl.LightningModule):
 
 
             prediction = prediction_all_agents[:,idx]
-            history = feats[idx,:,:2].detach().clone()
+            history = feats[idx,:,:2].cpu().numpy()
             #remove zero rows (no data in those frames) and rescale to obtain global coords.
-            history = (history[history.all(axis=1)]*rescale_xy + mean_xy[0]).squeeze() 
-            future = labels_pos[idx] 
+            history = (history[history.all(axis=1)]*rescale_xy.cpu().numpy() + mean_xy[0]).squeeze() 
+            future = labels_pos[idx].cpu().numpy()
             future = future[future.all(axis=1)] + mean_xy[0]
             if len(history.shape) < 2:
                 history=np.vstack([history, history])
-            if future.size()[0] == 1:
+            if future.shape[0] == 1:
                 future=np.vstack([future, future])
 
             # Plot predictions
@@ -221,7 +221,7 @@ class LitGNN(pl.LightningModule):
                                 ax=ax, shade=True, thresh=0.05, 
                                 color='b', zorder=600, alpha=0.8)
                         except:
-                            print('2-th leading minor of the array is not positive definite')
+                            print('2-th leading minor of the array is not positive definite.',  sys.exc_info()[0], 'ocurred.' )
                             continue
                     
                     '''
@@ -263,6 +263,7 @@ class LitGNN(pl.LightningModule):
 
             #Plot history
             ax.plot(history[:, 0], history[:, 1], 'k--')
+
             #Plot ground truth
             if future.shape[0] > 0:
                 ax.plot(future[:, 0],
@@ -286,16 +287,14 @@ class LitGNN(pl.LightningModule):
         
         #ax.axis('off')
         fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
-
-
+        print('Image saved in: ', os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'))
    
 def main(args: Namespace):
     print(args)
 
     seed=seed_everything(0)
 
-    test_dataset = nuscenes_Dataset(raw_dir=os.path.join(base_path, 'nuscenes_mini_val.pkl'), train_val_test='test', 
-                    rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, challenge_eval=True)  #25 seq 2 scenes 103, 916
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, challenge_eval=True)  #25 seq 2 scenes 103, 916
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
@@ -305,7 +304,7 @@ def main(args: Namespace):
     LitGNN_sys = LitGNN(model=model, history_frames=history_frames, future_frames= future_frames, train_dataset=None, val_dataset=None,
                  test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
       
-    trainer = pl.Trainer(gpus=0, deterministic=True,  profiler=True) 
+    trainer = pl.Trainer(gpus=1, deterministic=True,  profiler=True) 
  
     LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, history_frames=history_frames, future_frames= future_frames,
                     train_dataset=None, val_dataset=None, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
@@ -320,8 +319,8 @@ if __name__ == '__main__':
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=768)
+    parser.add_argument("--z_dims", type=int, default=32, help="Dimensionality of the latent space")
+    parser.add_argument("--hidden_dims", type=int, default=256)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
