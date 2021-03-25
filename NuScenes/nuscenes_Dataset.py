@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchvision import transforms, utils
+from torchvision.transforms import functional as trans_fn
 import os
 import utils
 os.environ['DGLBACKEND'] = 'pytorch'
@@ -24,9 +26,13 @@ future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
 max_num_objects = 150 
 total_feature_dimension = 16
+base_path = '/media/14TBDISK/sandra/nuscenes_processed'
+map_base_path = os.path.join(base_path, 'hd_maps_t')
 
 def collate_batch(samples):
-    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    graphs, masks, feats, gt, maps = map(list, zip(*samples))  # samples is a list of tuples
+    if maps[0] is not None:
+        maps = torch.vstack(maps)
     masks = torch.vstack(masks)
     feats = torch.vstack(feats)
     gt = torch.vstack(gt).float()
@@ -37,12 +43,13 @@ def collate_batch(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt, maps
 
 
 class nuscenes_Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, raw_dir, train_val_test='train', history_frames=history_frames, future_frames=future_frames, rel_types=True, challenge_eval=False):
+    def __init__(self, train_val_test='train', history_frames=history_frames, future_frames=future_frames, 
+                    rel_types=True, challenge_eval=False, map_encodding=False):
         '''
             :classes:   categories to take into account
             :rel_types: wether to include relationship types in edge features 
@@ -51,8 +58,9 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.types = rel_types
-        self.raw_dir = raw_dir 
+        self.raw_dir = os.path.join(base_path, 'nuscenes_challenge_global_8s_seq_'+self.train_val_test+'.pkl' )
         self.challenge_eval = challenge_eval
+        self.map_encodding = map_encodding
 
         self.load_data()
         self.process()        
@@ -61,6 +69,10 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         with open(self.raw_dir, 'rb') as reader:
             [all_feature, self.all_adjacency, self.all_mean_xy, self.all_tokens]= pickle.load(reader)
         self.all_feature=torch.from_numpy(all_feature).type(torch.float32)
+
+        #with open(os.path.join(base_path, 'nuscenes_challenge_global_8s_seq_'+self.train_val_test+'_map.pkl' ), 'rb') as reader:
+        #    self.all_maps=pickle.load(reader)
+                
 
     def process(self):
         '''
@@ -82,7 +94,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         feature_id = list(range(0,9)) 
         self.track_info = self.all_feature[:,:,:,13:15]
         self.object_type = self.all_feature[:,:,now_history_frame,8].int()
-        self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()
+        self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()   #Max=108 (train), 104(val), 83 (test)
         self.output_mask= self.all_feature[:,:,self.history_frames:,-2].unsqueeze_(-1)
         
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,0]))  
@@ -97,7 +109,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
     def __len__(self):
             return len(self.all_feature)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx):        
         graph = dgl.from_scipy(spp.coo_matrix(self.all_adjacency[idx][:self.num_visible_object[idx],:self.num_visible_object[idx]])).int()
         object_type = self.object_type[idx,:self.num_visible_object[idx]]
         # Compute relation types
@@ -122,15 +134,21 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
 
         if self.challenge_eval:
             return graph, output_mask, feats, gt, self.all_tokens[idx], self.all_mean_xy[idx,:2]
+        
+        if self.map_encodding:
+            sample_token=str(self.all_tokens[idx][0,1])
+            maps = pickle.load(open(os.path.join(map_base_path, sample_token + '.pkl'), 'rb'))  # [N_agents][3, 112,112] list of tensors
+            hd_maps = torch.vstack([map_i.unsqueeze(0) for map_i in maps])
+            return graph, output_mask, feats, gt, hd_maps
         else:        
-            return graph, output_mask, feats, gt
+            return graph, output_mask, feats, gt, None  
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='train', challenge_eval=False)  #3509
+    train_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=False, map_encodding=False)  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
-    train_dataloader=iter(DataLoader(train_dataset, batch_size=25, shuffle=False, collate_fn=collate_batch) )
+    train_dataloader=iter(DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch) )
     while(1):
-        batched_graph, masks, snorm_n, snorm_e, feats, gt = next(train_dataloader)
-        print(feats.shape)
+        batched_graph, masks, snorm_n, snorm_e, feats, gt, maps = next(train_dataloader)
+        print(feats.shape, batched_graph.num_nodes(), maps.shape)
     
