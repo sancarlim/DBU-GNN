@@ -135,17 +135,19 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         if self.challenge_eval:
             return graph, output_mask, feats, gt, self.all_tokens[idx], self.all_mean_xy[idx,:2]
         
+
+        hd_maps = None
         if self.map_encodding:
             sample_token=str(self.all_tokens[idx][0,1])
             maps = pickle.load(open(os.path.join(map_base_path, sample_token + '.pkl'), 'rb'))  # [N_agents][3, 112,112] list of tensors
             hd_maps = torch.vstack([map_i.unsqueeze(0) for map_i in maps])
-            return graph, output_mask, feats, gt, hd_maps
-        else:        
-            return graph, output_mask, feats, gt, None  
+            
+            
+        return graph, output_mask, feats, gt, hd_maps
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=False, map_encodding=False)  #3509
+    train_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=False, map_encodding=True)  #3509
     #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
     train_dataloader=iter(DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch) )
     while(1):

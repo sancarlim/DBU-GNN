@@ -6,7 +6,9 @@ import os
 os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 import matplotlib.pyplot as plt
-
+from torchvision.models import resnet18
+from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
+from torch.utils.data import DataLoader
 
 class MLP_Enc(nn.Module):
     "Encoder: MLP that takes GNN output as input and returns mu and log variance of the latent distribution."
@@ -159,7 +161,7 @@ class VAE_GNN(nn.Module):
 
         # Encode HD Maps
         if self.map_encoding:
-            model_ft = torchvision.models.resnet18(pretrained=True)
+            model_ft = resnet18(pretrained=True)
             self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
             ct=0
             for child in self.feature_extractor.children():
@@ -247,7 +249,7 @@ class VAE_GNN(nn.Module):
             maps_embedding = self.feature_extractor(maps)
 
             # Embeddings concatenation
-            h = torch.cat([maps_embedding, h], dim=-1)
+            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
             h = self.linear_cat(h)
 
         # Input GNN
@@ -277,7 +279,7 @@ class VAE_GNN(nn.Module):
             maps_embedding = self.feature_extractor(maps)
 
             # Embeddings concatenation
-            h = torch.cat([maps_embedding, h], dim=-1)
+            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
             h = self.linear_cat(h)
 
         # Input GNN
@@ -298,7 +300,24 @@ class VAE_GNN(nn.Module):
         return recon_y, mu, log_var
 
 if __name__ == '__main__':
-    model = VAE_GNN(48, 512, 128, 24, fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True)
-    print(model)
+    history_frames = 4
+    future_frames = 12
+    hidden_dims = 768
+    heads = 2
+
+    input_dim = 9*history_frames
+    output_dim = 2*future_frames 
+
+    hidden_dims = round(hidden_dims / heads) 
+    model = VAE_GNN(input_dim, hidden_dims, 16, output_dim, fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True, ew_dims=2, map_encoding=True)
+
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=True, history_frames=history_frames, future_frames=future_frames, map_encodding=True) 
+    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch)
+
+    for batch in test_dataloader:
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = batch
+        e_w = batched_graph.edata['w']
+        y, mu, log_var = model(batched_graph, feats,e_w,snorm_n,snorm_e, labels_pos, maps)
+        print(y.shape)
 
     

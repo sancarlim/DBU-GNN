@@ -12,25 +12,9 @@ from dgl.nn.pytorch.conv.gatconv import edge_softmax, Identity, expand_as_pair
 import matplotlib.pyplot as plt
 import math
 from torch.utils.data import DataLoader
-
-def collate_batch(samples):
-    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = torch.vstack(masks)
-    feats = torch.vstack(feats)
-    gt = torch.vstack(gt).float()
-
-    #masks = masks.view(masks.shape[0],-1)
-    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
-    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
-    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
-    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
-    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
-    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
-    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
-    batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
-
-
+from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
+from torchvision.models import resnet18
+from torchsummary import summary
 
 class GATConv(nn.Module):
     def __init__(self,
@@ -219,20 +203,37 @@ class MultiHeadGATLayer(nn.Module):
     
 class My_GAT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True, ew_type=False):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True, ew_type=False,  map_encoding=False):
         super().__init__()
-        self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.embedding_e = nn.Linear(1, hidden_dim)
-        self.embedding_e = nn.Linear(2, hidden_dim) if  ew_type else nn.Linear(1, hidden_dim)
+
+        self.map_encoding = map_encoding
         self.heads = heads
+
+        # Encoding HD Maps
+        if self.map_encoding:
+            model_ft = resnet18(pretrained=True)
+            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
+            ct=0
+            for child in self.feature_extractor.children():
+                ct+=1
+                if ct < 7:
+                    for param in child.parameters():
+                        param.requires_grad = False
+            
+            self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
+
+
+        self.embedding_h = nn.Linear(input_dim, hidden_dim)
+        self.embedding_e = nn.Linear(2, hidden_dim) if  ew_type else nn.Linear(1, hidden_dim)
+
         if heads == 1:
             self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
             self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
             self.linear1 = nn.Linear(hidden_dim, output_dim)          
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, merge='average', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, merge='cat', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.embedding_e2 = nn.Linear(2, hidden_dim*heads) if ew_type else nn.Linear(1, hidden_dim*heads)
-            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, merge='cat', res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
 
         if dropout:
@@ -250,14 +251,24 @@ class My_GAT(nn.Module):
         if self.heads > 1:
             nn.init.xavier_normal_(self.embedding_e2.weight)
     
-    def forward(self, g, feats,e_w,snorm_n,snorm_e):
+    def forward(self, g, feats,e_w,snorm_n,snorm_e, maps):
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         feats = feats.contiguous().view(feats.shape[0],-1)
-        # input embedding
-        h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
+
+        # Input embedding
+        h = self.embedding_h(feats)  #[N,hidds]
         e = self.embedding_e(e_w)
+
+        if self.map_encoding:
+            # Maps feature extraction
+            maps_embedding = self.feature_extractor(maps)  #[N,1,1,512]
+
+            # Embeddings concatenation
+            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
+            h = self.linear_cat(h)
+
+        # GAT Layers
         g.edata['w']=e
-        # gat layers
         h = self.gat_1(g, h,snorm_n) 
         if self.heads > 1:
             e = self.embedding_e2(e_w)
@@ -269,21 +280,23 @@ class My_GAT(nn.Module):
     
 if __name__ == '__main__':
 
-    history_frames = 3
-    future_frames = 3
-    hidden_dims = 256
-    heads = 1
+    history_frames = 4
+    future_frames = 12
+    hidden_dims = 768
+    heads = 2
 
-    test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat')  #1754
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
-     
-    input_dim = 5*history_frames
+    input_dim = 9*history_frames
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, res_connection=False, res_weight=False)
-    
-    iter_dataloader = iter(test_dataloader)
-    graph, masks, snorm_n, snorm_e, feats, labels = next(iter_dataloader)
-    edge_mask=graph.edata['w'].view(graph.edata['w'].shape[0],1)
-    out = model(graph,feats,  edge_mask,snorm_n,snorm_e)
+    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, map_encoding=True)
+    summary(model.feature_extractor, input_size=(3,112,112), device='cpu')
+
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=True, history_frames=history_frames, future_frames=future_frames, map_encodding=True) 
+    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch)
+
+    for batch in test_dataloader:
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = batch
+        e_w = batched_graph.edata['w']
+        out = model(batched_graph, feats,e_w,snorm_n,snorm_e, maps)
+        print(out.shape)

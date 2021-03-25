@@ -18,11 +18,12 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning import seed_everything
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import ModelCheckpoint
-import argparse
+
+from argparse import ArgumentParser, Namespace
 import math
 from torch.distributions.kl import kl_divergence
 from torch.distributions.normal import Normal
-
+from utils import compute_change_pos, str2bool
 
 
 def collate_batch(samples):
@@ -120,63 +121,17 @@ class LitGNN(pl.LightningModule):
         return loss, {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KL':kld_loss}
   
 
-    def check_overlap(self, preds):
-        intersect=[]
-        #y_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,1].detach().cpu().numpy()-preds[j,:,1].detach().cpu().numpy()))).size > 0  for i in range(len(preds)-1) for j in range(i+1,len(preds))]
-        #x_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,0].detach().cpu().numpy()-preds[j,:,0].detach().cpu().numpy()[::-1]))).size > 0 for i in range(len(preds)-1)  for j in range(i+1,len(preds))]
-        #intersect = [True if y and x else False for y,x in zip(y_intersect,x_intersect)]
-        '''
-        for i in range(len(preds)-1):
-            for j in range(i+1,len(preds)):
-                y_intersect=(torch.sign(preds[i,:,1]-preds[j,:,1])-torch.sign(preds[i,:,1]-preds[j,:,1])[0]).bool().any()  #True if non all-zero
-                x_intersect=(torch.sign(preds[i,:,0]-reversed(preds[j,:,0]))-torch.sign(preds[i,:,0]-reversed(preds[j,:,0]))[0]).bool().any()
-                intersect.append(True if y_intersect and x_intersect else False)
-        '''
-        y_sub = torch.cat([torch.sign(preds[i:-1,:,1]-preds[i+1:,:,1]) for i in range(len(preds)-1)])  #N(all combinations),6
-        y_intersect=( y_sub - y_sub[:,0].view(len(y_sub),-1)).bool().any(dim=1) #True if non all-zero (change sign)
-        x_sub = torch.cat([torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0])) for i in range(len(preds)-1)])
-        x_intersect = (x_sub -x_sub[:,0].view(len(x_sub),-1)).bool().any(dim=1)
-        #x_intersect=torch.cat([(torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0]))-torch.sign(preds[i:-1,:,0]-reversed(preds[i+1:,:,0]))[0]).bool().any(dim=1) for i in range(len(preds)-1)])
-        intersect = torch.logical_and(y_intersect,x_intersect) #[torch.count_nonzero(torch.logical_and(y,x))/len(x) for y,x in zip(y_intersect,x_intersect)] #to intersect, both True
-        return torch.count_nonzero(intersect)/len(intersect) #percentage of intersections between all combinations
-        #y_intersect=[np.argwhere(np.diff(np.sign(preds[i,:,1].cpu()-preds[j,:,1].cpu()))).size > 0 for j in range(i+1,len(preds)) for i in range(len(preds)-1)]
-
-    def compute_change_pos(self, feats,gt, scale_factor):
-        gt_vel = gt.clone()  #.detach().clone()
-        feats_vel = feats[:,:,:2].clone()
-        new_mask_feats = (feats_vel[:, 1:]!=0) * (feats_vel[:, :-1]!=0) 
-        new_mask_gt = (gt_vel[:, 1:]!=0) * (gt_vel[:, :-1]!=0) 
-            
-        rescale_xy=torch.ones((1,1,2), device=self.device)*scale_factor
-
-        gt_vel[:, 1:] = (gt_vel[:, 1:] - gt_vel[:, :-1]) * new_mask_gt
-        gt_vel[:, :1] = (gt_vel[:, :1] - feats_vel[:, -1:]*rescale_xy) * new_mask_gt[:,0:1]
-        feats_vel[:, 1:] = (feats_vel[:, 1:] - feats_vel[:, :-1]) * new_mask_feats
-        feats_vel[:, 0] = 0
-        
-        return feats_vel, gt_vel
-
-    def compute_long_lat_error(self,pred,gt,mask):
-        pred = pred*mask #B*V,T,C  (B n grafos en el batch)
-        gt = gt*mask  # outputmask BV,T,C
-        lateral_error = pred[:,:,0]-gt[:,:,0]
-        long_error = pred[:,:,1] - gt[:,:,1]  #BV,T
-        overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
-        return lateral_error, long_error, overall_num
-
-    
-    
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
         
         if self.dataset  == 'apollo':
             #Use relative positions
-            feats_rel, labels = self.compute_change_pos(feats,labels_pos,1)
+            feats_rel, labels = compute_change_pos(feats,labels_pos,1)
             #Input pos + heading + vel
             feats = torch.cat([feats_rel, feats[:,:,2:]], dim=-1)[:,1:,:] # torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
+            _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
 
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
@@ -195,11 +150,11 @@ class LitGNN(pl.LightningModule):
         
         if self.dataset == 'apollo':
             #Use relative positions
-            feats_rel,labels = self.compute_change_pos(feats,labels_pos,1)
+            feats_rel,labels = compute_change_pos(feats,labels_pos,1)
             #Input pos + heading + vel
             feats = torch.cat([feats_rel, feats[:,:,2:self.input_dim]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         else:
-            _, labels = self.compute_change_pos(feats,labels_pos, self.scale_factor)
+            _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
 
         e_w = batched_graph.edata['w']
         if not self.rel_types:
@@ -260,47 +215,50 @@ class LitGNN(pl.LightningModule):
         self.log_dict({'test/ade': min(ade), "test/fde": fde[ade.index(min(ade))]})
         
    
-def sweep_train():
+def main(args: Namespace):
     seed=seed_everything(np.random.randint(1000000))
-    run=wandb.init()  #for sweep
-    #run=wandb.init(project="dbu_graph", config=default_config) #for single run
-    config = wandb.config
 
-    history_frames = config.history_frames
-    future_frames = config.future_frames
-
-    if config.dataset == 'apollo':
-        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=config.ew_dims>1) #3447
-        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=config.ew_dims>1)  #919
-        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=config.ew_dims>1)  #230
+    if args.dataset == 'apollo':
+        train_dataset = ApolloScape_DGLDataset(train_val='train', test=False, rel_types=args.ew_dims>1) #3447
+        val_dataset = ApolloScape_DGLDataset(train_val='val', test=False, rel_types=args.ew_dims>1)  #919
+        test_dataset = ApolloScape_DGLDataset(train_val='test', test=False, rel_types=args.ew_dims>1)  #230
+        history_frames = 6
+        future_frames = 6
         print(len(train_dataset), len(val_dataset))
         input_dim = 5
-    elif config.dataset == 'ind':
-        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_dims>1) #12281
-        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_dims>1)  #3509
-        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=config.model_type, classes=(1,2,3,4), rel_types=config.ew_dims>1)  #1754
+    elif args.dataset == 'ind':
+        train_dataset = inD_DGLDataset(train_val='train', history_frames=history_frames, future_frames=future_frames, model_type=args.model_type, classes=(1,2,3,4), rel_types=cargsonfig.ew_dims>1) #12281
+        val_dataset = inD_DGLDataset(train_val='val', history_frames=history_frames, future_frames=future_frames, model_type=args.model_type, classes=(1,2,3,4), rel_types=args.ew_dims>1)  #3509
+        test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=args.model_type, classes=(1,2,3,4), rel_types=args.ew_dims>1)  #1754
         print(len(train_dataset), len(val_dataset), len(test_dataset))
+        history_frames = 8
+        future_frames = 12
         input_dim = 6
-    wandb_logger = pl_loggers.WandbLogger() 
-    wandb_logger.experiment.log({'seed': seed}) 
-    
-    input_dim_model = input_dim*(history_frames-1) if config.dataset=='apollo' else input_dim*history_frames
+
+    input_dim_model = input_dim*(history_frames-1) if args.dataset=='apollo' else input_dim*history_frames
     output_dim = 2*future_frames 
 
-    if config.model_type == 'vae_gated':
-        model = VAE_GATED(input_dim_model, config.hidden_dims, z_dim=config.z_dims, output_dim=output_dim, fc=False, dropout=config.dropout,  ew_dims=config.ew_dims)
+    if args.model_type == 'vae_gated':
+        model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
     else:
-        model = VAE_GNN(input_dim_model, config.hidden_dims//config.heads, config.z_dims, output_dim, fc=False, dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop, heads=config.heads, att_ew=config.att_ew, ew_dims=config.ew_dims)
+        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims)
 
-    LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=config.learning_rate,  wd=config.wd, history_frames=config.history_frames, future_frames= config.future_frames, alfa= config.alfa, beta = config.beta, delta=config.delta,
-    dataset=config.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=config.ew_dims>1, scale_factor=config.scale_factor)
-    #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+    LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=args.learning_rate,  wd=args.wd, history_frames=args.history_frames, future_frames= args.future_frames, alfa= args.alfa, beta = args.beta, delta=args.delta,
+    dataset=args.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
     
-    checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath='/media/14TBDISK/sandra/logs/'+os.environ.get('WANDB_SWEEP_ID')+'/'+run.name)
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=3)
-    trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
-    #resume_from_checkpoint=path, 
-    
+
+    if not args.nowandb:
+        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/',os.environ.get('WANDB_SWEEP_ID'),run.name))
+        run=wandb.init(project="dbu_graph", entity="sandracl72", job_type="training")  
+        wandb_logger = pl_loggers.WandbLogger() 
+        wandb_logger.experiment.log({'seed': seed}) 
+        #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+        trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, logger=wandb_logger, callbacks=[early_stop_callback,checkpoint_callback], profiler=True)  # resume_from_checkpoint=config.path, precision=16, limit_train_batches=0.5, progress_bar_refresh_rate=20,
+    else:
+        checkpoint_callback = ModelCheckpoint(monitor='Sweep/val_loss', mode='min', dirpath=os.path.join('/media/14TBDISK/sandra/logs/',run.name))
+        trainer = pl.Trainer( weights_summary='full', gpus=1, deterministic=True, precision=16, callbacks=[early_stop_callback,checkpoint_callback], profiler=True) 
+
     print('Best lr: ', LitGNN_sys.lr)
     print('GPU Nº: ', device)
     print("############### TRAIN ####################")
@@ -308,34 +266,38 @@ def sweep_train():
     print('Model checkpoint path:',trainer.checkpoint_callback.best_model_path)
     
     print("############### TEST ####################")
-    if config.dataset !='apollo':
+    if args.dataset !='apollo':
         trainer.test(ckpt_path='best')
+ 
+
+
+if __name__ == '__main__':
+
+    parser = ArgumentParser()
+    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
+    parser.add_argument("--scale_factor", type=int, default=1, help="Wether to scale x,y global positions (zero-centralized)")
+    parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
+    parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
+    parser.add_argument("--batch_size", type=int, default=512, help="Size of the batches")
+    parser.add_argument("--latent_dim", type=int, default=100, help="Dimensionality of the latent space")
+    parser.add_argument("--hidden_dims", type=int, default=512) 
+    parser.add_argument('--dataset', type=str, default='apollo', choices=['ind', 'apollo'], help='One of the supported datasets')
+    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
+                        choices=['vae_gat', 'vae_gated'])
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--feat_drop", type=float, default=0.)
+    parser.add_argument("--attn_drop", type=float, default=0.25)
+    parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
+    parser.add_argument("--beta", type=float, default=1.0, help='Weighting factor of the KL divergence loss term')
+    parser.add_argument("--alfa", type=float, default=0., help='Social consistency term')
+    parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
+    parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
+    parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')
 
     
-default_config = {
-            "ew_dims":2,
-            "input_dim": 6,
-            "dataset":'ind',
-            "history_frames":8,
-            "future_frames":12,
-            "learning_rate":1e-6,
-            "batch_size": 1,
-            "hidden_dims": 512,
-            "z_dims": 128,
-            "dropout": 0.1,
-            "alfa": 0,
-            "beta": 1,
-            "delta": 1,
-            "feat_drop": 0.,
-            "attn_drop":0.25,
-            "bn":False,
-            "wd": 0.01,
-            "heads": 2,
-            "att_ew": True,               
-            "gcn_drop": 0.,
-            "gcn_bn": True,
-            'embedding':True
-        }
+    device=os.environ.get('CUDA_VISIBLE_DEVICES')
+    hparams = parser.parse_args()
 
-device=os.environ.get('CUDA_VISIBLE_DEVICES')
-sweep_train()    
+    main(hparams)
+ 

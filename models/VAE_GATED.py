@@ -6,6 +6,7 @@ import os
 os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 import matplotlib.pyplot as plt
+from torchvision.models import resnet18
 
 
 class MLP_Enc(nn.Module):
@@ -142,7 +143,7 @@ class VAE_GATED(nn.Module):
         self.map_encoding = map_encoding
 
         if self.map_encoding:
-            model_ft = torchvision.models.resnet18(pretrained=True)
+            model_ft = resnet18(pretrained=True)
             self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
             ct=0
             for child in self.feature_extractor.children():
@@ -231,7 +232,7 @@ class VAE_GATED(nn.Module):
             maps_embedding = self.feature_extractor(maps)
 
             # Embeddings concatenation
-            h = torch.cat([maps_embedding, h], dim=-1)
+            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
             h = self.linear_cat(h)
 
         # Input GNN
@@ -262,9 +263,9 @@ class VAE_GATED(nn.Module):
             maps_embedding = self.feature_extractor(maps)
 
             # Embeddings concatenation
-            h = torch.cat([maps_embedding, h], dim=-1)
+            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
             h = self.linear_cat(h)
-            
+
         # Input GNN
         h, e_inp = self.GNN_inp(g, h, e, snorm_n, snorm_e)
         

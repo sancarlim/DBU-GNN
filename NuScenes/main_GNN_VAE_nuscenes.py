@@ -8,7 +8,7 @@ os.environ['DGLBACKEND'] = 'pytorch'
 import sys
 sys.path.append('../../DBU_Graph')
 import numpy as np
-from nuscenes_Dataset import nuscenes_Dataset
+from nuscenes_Dataset import nuscenes_Dataset, collate_batch
 from models.VAE_GNN import VAE_GNN
 from models.VAE_GATED import VAE_GATED
 import random
@@ -34,21 +34,6 @@ total_frames = history_frames + future_frames #2s of history + 6s of prediction
 input_dim_model = history_frames*9 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
 
-
-
-def collate_batch(samples):
-    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = torch.vstack(masks)
-    feats = torch.vstack(feats)
-    gt = torch.vstack(gt).float()
-    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
-    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
-    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
-    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
-    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
-    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
-    batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
 
 
 
