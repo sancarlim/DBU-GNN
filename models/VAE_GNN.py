@@ -149,11 +149,26 @@ class GAT_VAE(nn.Module):
         return h
     
 class VAE_GNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2, feat_drop=0., attn_drop=0., heads=1,att_ew=False, ew_dims=1):
+    def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2, feat_drop=0., 
+                    attn_drop=0., heads=1,att_ew=False, ew_dims=1, map_encoding=False):
         super().__init__()
         self.heads = heads
         self.fc = fc
         self.z_dim = z_dim
+        self.map_encoding = map_encoding
+
+        # Encode HD Maps
+        if self.map_encoding:
+            model_ft = torchvision.models.resnet18(pretrained=True)
+            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
+            ct=0
+            for child in self.feature_extractor.children():
+                ct+=1
+                if ct < 7:
+                    for param in child.parameters():
+                        param.requires_grad = False
+            
+            self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
 
         #Input embeddings
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
@@ -214,16 +229,27 @@ class VAE_GNN(nn.Module):
         eps = torch.randn_like(std)
         return mean + std * eps
 
-    def inference(self, g, feats, e_w, snorm_n,snorm_e):
+    def inference(self, g, feats, e_w, snorm_n,snorm_e, maps):
         """
         Samples from a normal distribution and decodes conditioned to the GNN outputs.   
         """
-        # Reshape from (B*V,T,C) to (B*V,T*C) 
+         # Reshape from (B*V,T,C) to (B*V,T*C) 
         feats = feats.contiguous().view(feats.shape[0],-1)
+
         # Input embedding
         h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
         e = self.embedding_e(e_w)
         g.edata['w']=e
+
+        #Map Encoding
+        if self.map_encoding:
+            # Maps feature extraction
+            maps_embedding = self.feature_extractor(maps)
+
+            # Embeddings concatenation
+            h = torch.cat([maps_embedding, h], dim=-1)
+            h = self.linear_cat(h)
+
         # Input GNN
         h = self.GNN_inp(g, h, e_w, snorm_n)
         #Sample from gaussian distribution (BV, Z_dim)
@@ -235,14 +261,25 @@ class VAE_GNN(nn.Module):
         recon_y = self.MLP_decoder(h)
         return recon_y
     
-    def forward(self, g, feats, e_w, snorm_n, snorm_e, gt):
+    def forward(self, g, feats, e_w, snorm_n, snorm_e, gt, maps):
         # Reshape from (B*V,T,C) to (B*V,T*C) 
         feats = feats.contiguous().view(feats.shape[0],-1)
         gt = gt.contiguous().view(gt.shape[0],-1)
+
         # Input embedding
         h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
         e = self.embedding_e(e_w)
         g.edata['w']=e
+
+        # Map encoding
+        if self.map_encoding:
+            # Maps feature extraction
+            maps_embedding = self.feature_extractor(maps)
+
+            # Embeddings concatenation
+            h = torch.cat([maps_embedding, h], dim=-1)
+            h = self.linear_cat(h)
+
         # Input GNN
         h = self.GNN_inp(g, h, e_w, snorm_n)
         

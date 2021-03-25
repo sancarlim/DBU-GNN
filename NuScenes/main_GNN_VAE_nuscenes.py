@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import os
 os.environ['DGLBACKEND'] = 'pytorch'
+import sys
+sys.path.append('../../DBU_Graph')
 import numpy as np
 from nuscenes_Dataset import nuscenes_Dataset
 from models.VAE_GNN import VAE_GNN
@@ -29,7 +31,7 @@ future = 6
 history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
-input_dim_model = history_frames*7 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
+input_dim_model = history_frames*9 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
 
 
@@ -129,13 +131,13 @@ class LitGNN(pl.LightningModule):
     
     def training_step(self, train_batch, batch_idx):
         '''returns a loss from a single batch'''
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = train_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = train_batch
         _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
 
-        pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, labels)
+        pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, labels, maps)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta)
@@ -145,13 +147,13 @@ class LitGNN(pl.LightningModule):
 
 
     def validation_step(self, val_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = val_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = val_batch
         _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
         e_w = batched_graph.edata['w']
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
         
-        pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels)
+        pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels, maps)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         
         total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='mse')
@@ -167,7 +169,7 @@ class LitGNN(pl.LightningModule):
     
          
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos = test_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = test_batch
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
         last_loc = last_loc*rescale_xy       
@@ -181,7 +183,7 @@ class LitGNN(pl.LightningModule):
         #Para el most-likely coger el modo con pi mayor de los 3 y o bien coger muestra de la media 
         for i in range(5): # @top10 Saco el min ADE/FDE por escenario tomando 15 muestras (15 escenarios)
             #Model predicts relative_positions
-            preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e)
+            preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e, maps)
             preds=preds.view(preds.shape[0],self.future_frames,-1)
             #Convert prediction to absolute positions
             for j in range(1,labels_pos.shape[1]):
@@ -213,14 +215,14 @@ def main(args: Namespace):
 
     seed=seed_everything(0)
 
-    train_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_train.pkl', train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
-    val_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_val.pkl', train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
-    test_dataset = nuscenes_Dataset(raw_dir='/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_test.pkl', train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
+    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
+    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
 
     if args.model_type == 'vae_gated':
-        model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
+        model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims, map_encoding=args.maps)
     else:
-        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims)
+        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, map_encoding=args.maps)
 
     LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
@@ -282,6 +284,9 @@ if __name__ == '__main__':
     parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
     #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
+    
+    parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
+    
     parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')  
     parser.add_argument('--ckpt', type=str, default=None, help='ckpt path for only testing.')   
 
