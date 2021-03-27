@@ -162,6 +162,7 @@ Graph_InitialTests.ipynb
 *.yml
 *.yaml
 *.png   
+/lightning_logs
 
 /GRIP/
 ApolloScape
