@@ -13,8 +13,9 @@ import matplotlib.pyplot as plt
 import math
 from torch.utils.data import DataLoader
 from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
-from torchvision.models import resnet18
+from torchvision.models import resnet18, mobilenet_v2
 from torchsummary import summary
+from models.MapEncoder import MapEncoder
 
 class GATConv(nn.Module):
     def __init__(self,
@@ -131,8 +132,8 @@ class My_GATLayer(nn.Module):
             self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
         else:
             self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
-        self.feat_drop_l = nn.Dropout(feat_drop, inplace=False)
-        self.attn_drop_l = nn.Dropout(attn_drop, inplace=False)   
+        self.feat_drop_l = nn.Dropout(feat_drop)
+        self.attn_drop_l = nn.Dropout(attn_drop)   
         self.res_con = res_connection
         self.reset_parameters()
       
@@ -203,27 +204,49 @@ class MultiHeadGATLayer(nn.Module):
     
 class My_GAT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True, ew_type=False,  map_encoding=False):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., 
+                attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True,
+                ew_type=False,  backbone='mobilenet', pretrained=False):
         super().__init__()
 
-        self.map_encoding = map_encoding
         self.heads = heads
 
-        # Encoding HD Maps
-        if self.map_encoding:
-            model_ft = resnet18(pretrained=True)
-            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
-            ct=0
-            for child in self.feature_extractor.children():
-                ct+=1
-                if ct < 7:
+        ###############
+        # Map Encoder #
+        ###############
+        if backbone == 'map_encoder':            
+            self.feature_extractor = MapEncoder(input_channels = 3, input_size=224, 
+                                                    hidden_channels = [10,20,10,1], output_size = hidden_dim//2, 
+                                                    kernels = [5,5,5,3], strides = [2,2,1,1])
+        elif backbone == 'mobilenet':       
+            if not pretrained:
+                self.feature_extractor = mobilenet_v2(pretrained=False, num_classes=512)
+            else:
+                self.feature_extractor = mobilenet_v2(pretrained=pretrained)
+                self.feature_extractor.classifier[1] = nn.Linear(in_features=self.feature_extractor.classifier[1].in_features, out_features=512)
+                if pretrained:
+                    ct=0 
+                    for child in self.feature_extractor.features:
+                        ct+=1
+                        if ct < 16:
+                            for param in child.parameters():
+                                param.requires_grad = False
+        else:       
+            model_ft = resnet18(pretrained=pretrained)
+            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1]) 
+            if pretrained:
+                ct=0
+                for child in self.feature_extractor.children():
+                    #ct+=1
+                    #if ct < 7:
                     for param in child.parameters():
                         param.requires_grad = False
             
-            self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
-
-
-        self.embedding_h = nn.Linear(input_dim, hidden_dim)
+            
+        #self.linear_cat = nn.Linear(hidden_dim+512, hidden_dim) 
+            
+        self.embedding_h = nn.Linear(input_dim, hidden_dim//2)
+        hidden_dim = hidden_dim//2*2
         self.embedding_e = nn.Linear(2, hidden_dim) if  ew_type else nn.Linear(1, hidden_dim)
 
         if heads == 1:
@@ -257,15 +280,15 @@ class My_GAT(nn.Module):
 
         # Input embedding
         h = self.embedding_h(feats)  #[N,hidds]
-        e = self.embedding_e(e_w)
+        e = self.embedding_e(e_w)       
 
-        if self.map_encoding:
-            # Maps feature extraction
-            maps_embedding = self.feature_extractor(maps)  #[N,1,1,512]
+        # Maps feature extraction
+        maps_embedding = self.feature_extractor(maps)  #[N,1,1,512]
 
-            # Embeddings concatenation
-            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
-            h = self.linear_cat(h)
+        # Embeddings concatenation
+        h = torch.cat([maps_embedding.squeeze(dim=-1).squeeze(dim=-1), h], dim=-1)
+        #h = self.linear_cat(h)
+        #h = F.relu(h)
 
         # GAT Layers
         g.edata['w']=e
@@ -282,18 +305,18 @@ if __name__ == '__main__':
 
     history_frames = 4
     future_frames = 12
-    hidden_dims = 768
-    heads = 2
+    hidden_dims = 1024
+    heads = 3
 
-    input_dim = 9*history_frames
+    input_dim = 7*history_frames
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, map_encoding=True)
-    summary(model.feature_extractor, input_size=(3,112,112), device='cpu')
+    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='map_encoder', pretrained=True)
+    summary(model.feature_extractor, input_size=(3,224,224), device='cpu')
 
     test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=True, history_frames=history_frames, future_frames=future_frames, map_encodding=True) 
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_batch)
+    test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
 
     for batch in test_dataloader:
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = batch

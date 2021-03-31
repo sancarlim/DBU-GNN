@@ -38,7 +38,9 @@ output_dim = future_frames*2
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, scale_factor=1):
+    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, 
+                       batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, 
+                       scale_factor:int = 1, wandb: bool = True):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -58,6 +60,7 @@ class LitGNN(pl.LightningModule):
         self.test_dataset = test_dataset
         self.rel_types = rel_types
         self.scale_factor = scale_factor
+        self.wandb = wandb
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -70,13 +73,13 @@ class LitGNN(pl.LightningModule):
         return opt
     
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=12, collate_fn=collate_batch)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8, collate_fn=collate_batch)
     
     def val_dataloader(self):
-        return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, collate_fn=collate_batch)
+        return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8, collate_fn=collate_batch)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=16, shuffle=False, num_workers=12, collate_fn=collate_batch) 
+        return DataLoader(self.test_dataset, batch_size=16, shuffle=False, num_workers=8, collate_fn=collate_batch) 
     
     def compute_RMSE(self,pred, gt, mask): 
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
@@ -148,7 +151,7 @@ class LitGNN(pl.LightningModule):
 
     def validation_epoch_end(self, val_loss_over_batches):
         #log best val loss
-        if torch.mean(torch.tensor(val_loss_over_batches,device=self.device)) < self.min_val_loss:            
+        if self.wandb and torch.mean(torch.tensor(val_loss_over_batches,device=self.device)) < self.min_val_loss:            
             self.min_val_loss =  torch.mean(torch.tensor(val_loss_over_batches,device=self.device))
             self.logger.experiment.summary["best_val_loss"] = self.min_val_loss
     
@@ -200,9 +203,9 @@ def main(args: Namespace):
 
     seed=seed_everything(0)
 
-    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
-    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
+    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps) #3447
+    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #919
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims, map_encoding=args.maps)
@@ -213,13 +216,13 @@ def main(args: Namespace):
     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
     
     
-    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=3)
+    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=4)
 
     if not args.nowandb:
         run=wandb.init(job_type="training")  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
-        #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+        wandb_logger.watch(LitGNN_sys.model, log='gradients')  #log='all' for params & grads
         if os.environ.get('WANDB_SWEEP_ID') is not None: 
             ckpt_folder = os.path.join(os.environ.get('WANDB_SWEEP_ID'), run.name)
         else:
@@ -261,6 +264,8 @@ if __name__ == '__main__':
     parser.add_argument("--hidden_dims", type=int, default=1024)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
+    parser.add_argument("--backbone", type=str, default='mobilenet', help="Choose CNN backbone.",
+                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.25)

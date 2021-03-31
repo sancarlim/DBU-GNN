@@ -37,7 +37,10 @@ ONEOVERSQRT2PI = 1.0 / math.sqrt(2*math.pi)
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, train_dataset, val_dataset, test_dataset, dataset, history_frames: int=3, future_frames: int=3, input_dim: int=2, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., prob: bool = False, mask: bool = False, rel_types: bool = False, scale_factor=1):
+    def __init__(self, train_dataset, val_dataset, test_dataset, dataset, history_frames: int=3, future_frames: int=3, 
+                        input_dim: int=2, model: nn.Module = GCN, lr: float = 1e-3, batch_size: int = 64, model_type: str = 'gcn', 
+                        wd: float = 1e-1, alfa: float = 2, beta: float = 0., delta: float = 1., prob: bool = False, 
+                        mask: bool = False, rel_types: bool = False, scale_factor: int = 1, wandb: bool = True):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -63,6 +66,7 @@ class LitGNN(pl.LightningModule):
         self.mask = mask
         self.rel_types = rel_types
         self.scale_factor = scale_factor
+        self.wandb = wandb
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -78,13 +82,13 @@ class LitGNN(pl.LightningModule):
         return opt
     
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size,num_workers=12, shuffle=True,  collate_fn=collate_batch)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size,num_workers=8, shuffle=True,  collate_fn=collate_batch)
     
     def val_dataloader(self):
-        return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12,collate_fn=collate_batch)
+        return  DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8,collate_fn=collate_batch)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=1, shuffle=False,num_workers=12, collate_fn=collate_batch) # 
+        return DataLoader(self.test_dataset, batch_size=1, shuffle=False,num_workers=8, collate_fn=collate_batch) # 
     
     def gaussian_probability(self,sigma, mu, target):
         """Returns the probability of `target` given MoG parameters `sigma` and `mu`.
@@ -176,7 +180,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats[:,:,:],e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e, maps)   #pi,sigma,mu
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, maps)   #pi,sigma,mu
         
 
         #Probabilistic vs. Deterministic output
@@ -224,7 +228,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats, e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e, maps)
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, maps)
         
         
         if self.probabilistic:
@@ -246,10 +250,9 @@ class LitGNN(pl.LightningModule):
     
     def validation_epoch_end(self, val_loss_over_batches):
         #log best val loss
-        if torch.mean(torch.tensor(val_loss_over_batches,device=self.device)) < self.min_val_loss:            
-            self.min_val_loss =  torch.mean(torch.tensor(val_loss_over_batches,device=self.device))
-            self.logger.experiment.summary["best_val_loss"] = self.min_val_loss
-    
+        if self.wandb and torch.mean(torch.tensor(val_loss_over_batches,device=self.device)) < self.min_val_loss:            
+                self.min_val_loss =  torch.mean(torch.tensor(val_loss_over_batches,device=self.device))
+                self.logger.experiment.summary["best_val_loss"] = self.min_val_loss
 
 
     def test_step(self, test_batch, batch_idx):
@@ -274,7 +277,7 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats,e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats[:,:,:self.input_dim],e_w,snorm_n,snorm_e, maps)
+            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, maps)
        
        
         if self.probabilistic:
@@ -329,9 +332,9 @@ class LitGNN(pl.LightningModule):
             self.overall_lat_err_list.append(overall_lat_err.detach().cpu().numpy())
             
             if self.future_frames == 8:
-                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_2.8": overall_loss_time[6:7], "test/loss_3.2": overall_loss_time[-1:] })
+                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time), "test/loss_1": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_2.5": overall_loss_time[6:7], "test/loss_3.2": overall_loss_time[-1:] })
             else:
-                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time)//self.future_frames, "test/loss_0.8": overall_loss_time[1:2], "test/loss_2": overall_loss_time[4:5], "test/loss_3.2": overall_loss_time[7:8], "test/loss_4": overall_loss_time[9:10], "test/loss_4.8": overall_loss_time[-1:] }) #, sync_dist=True
+                self.log_dict({'Sweep/test_loss': torch.sum(overall_loss_time)//self.future_frames, "test/loss_1": overall_loss_time[1:2], "test/loss_2.5": overall_loss_time[4:5], "test/loss_4": overall_loss_time[7:8], "test/loss_5": overall_loss_time[9:10], "test/loss_6": overall_loss_time[-1:] }) #, sync_dist=True
             
     def on_test_epoch_end(self):
         #wandb_logger.experiment.save(run.name + '.ckpt')
@@ -358,7 +361,7 @@ class LitGNN(pl.LightningModule):
                 self.log_dict({"test/var_2": torch.tensor(var[4:5]), "test/var_2.8": torch.tensor(var[6:7]), "test/var_4": torch.tensor(var[9:10]), "test/var_4.8": torch.tensor(var[-1:]) }) #, sync_dist=True
 
 def main(args: Namespace):
-    seed=seed_everything(np.random.randint(1000000))
+    seed=seed_everything(121958)
 
     if args.dataset == 'apollo':
         history_frames = 6
@@ -379,10 +382,10 @@ def main(args: Namespace):
     else:
         history_frames = 4
         future_frames = 12
-        train_dataset = nuscenes_Dataset( train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=True) #3447
-        val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=True)  #919
-        test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=True)  #230
-        input_dim = 7
+        train_dataset = nuscenes_Dataset( train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps) #3447
+        val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #919
+        test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #230
+        input_dim = 9
 
 
     input_dim_model = input_dim*history_frames   #input_dim*(history_frames-1) if config.dataset=='apollo' else input_dim*history_frames
@@ -390,10 +393,11 @@ def main(args: Namespace):
 
     if args.model_type == 'gat_mdn':
         hidden_dims = round(args.hidden_dims // args.heads)
-        model = SCOUT_MDN(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, bn=False, feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, map_encoding=args.maps)
+        model = SCOUT_MDN(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, bn=False, feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1)
     elif args.model_type == 'gat':
         hidden_dims = round(args.hidden_dims // args.heads)
-        model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, bn=False, feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, map_encoding=args.maps)
+        model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
+                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone, pretrained=args.pretrained)
     elif args.model_type == 'gcn':
         model = model = GCN(in_feats=input_dim_model, hid_feats=args.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn, embedding=config.embedding)
     elif args.model_type == 'gated':
@@ -407,15 +411,16 @@ def main(args: Namespace):
     
 
     LitGNN_sys = LitGNN(model=model, input_dim=input_dim, lr=args.lr, model_type= args.model_type, wd=args.wd, history_frames=history_frames, future_frames= future_frames, alfa= args.alfa,
-                        beta = args.beta, delta=args.delta, prob=args.probabilistic, dataset=args.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, mask=args.mask, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)  
+                        beta = args.beta, delta=args.delta, prob=args.probabilistic, dataset=args.dataset, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, 
+                        mask=args.mask, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, wandb = not args.nowandb)  
 
-    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=3)
+    early_stop_callback = EarlyStopping('Sweep/val_loss', patience=6)
     
     if not args.nowandb:
-        run=wandb.init(job_type="training")  
+        run=wandb.init(job_type="training", entity='sandracl72', project='nuscenes')  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
-        #wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+        wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
         if os.environ.get('WANDB_SWEEP_ID') is not None: 
             ckpt_folder = os.path.join(os.environ.get('WANDB_SWEEP_ID'), run.name)
         else:
@@ -450,24 +455,30 @@ if __name__ == '__main__':
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
+    parser.add_argument("--lr", type=float, default=5e-5, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
     parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
-    parser.add_argument("--hidden_dims", type=int, default=1024)
+    parser.add_argument("--hidden_dims", type=int, default=768)
     parser.add_argument("--model_type", type=str, default='gat', help="Choose model type / aggregation function.")
     parser.add_argument("--dataset", type=str, default='nuscenes', help="Choose dataset.",
                                         choices=['nuscenes', 'ind', 'apollo'])
+    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
+                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument('--pretrained', type=str2bool, nargs='?', const=True, default=True, help='use pretrained backbone (Imagenet).')
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.25)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument("--alfa", type=float, default=0, help='Weighting factor of the overlap loss term')
     parser.add_argument("--beta", type=float, default=0, help='Weighting factor of the FDE loss term')
-    parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss')
+    parser.add_argument("--delta", type=float, default=.1, help='Delta factor in Huber Loss')
     parser.add_argument('--mask', type=str2bool, nargs='?', const=True, default=False, help='use the mask to not taking into account unexisting frames in loss function')  
     parser.add_argument('--probabilistic', action='store_true', help='use probabilistic loss function (MDN)')  
     #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
-    parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
+    parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=True, help="Add edge features in attention function (GAT)")
+    
+    parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
+
     parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')  
     parser.add_argument('--ckpt', type=str, default=None, help='ckpt path for only testing.')   
 
