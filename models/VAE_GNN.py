@@ -69,42 +69,49 @@ class GAT_VAE(nn.Module):
     
 class VAE_GNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2, feat_drop=0., 
-                    attn_drop=0., heads=1,att_ew=False, ew_dims=1, map_encoding=False):
+                    attn_drop=0., heads=1,att_ew=False, ew_dims=1, backbone='map_encoder'):
         super().__init__()
         self.heads = heads
         self.fc = fc
         self.z_dim = z_dim
-        self.map_encoding = map_encoding
 
         ###############
         # Map Encoder #
         ###############
-        if self.map_encoding:
+        if backbone == 'map_encoder':
             self.map_feature_extractor = MapEncoder(input_channels = 3, input_size=224, 
                                                     hidden_channels = [10,20,10,1], output_size = hidden_dim//2, 
                                                     kernels = [5,5,5,3], strides = [2,2,1,1])
 
+            enc_dims = hidden_dim//2*2+output_dim
+            dec_dims = z_dim + hidden_dim//2*2
             #self.map_feature_extractor = mobilenet_v2(pretrained=False, input_channels=1, num_classes=512)
-            '''
+        elif backbone == 'resnet18':   
             # Use Resnet18 as backbone
             model_ft = resnet18(pretrained=True)
-            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
+            self.map_feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
             ct=0
-            for child in self.feature_extractor.children():
+            for child in self.map_feature_extractor.children():
                 ct+=1
-                if ct < 7:
+                if ct < 5: #7
                     for param in child.parameters():
                         param.requires_grad = False
-            '''
-            #self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
+            enc_dims = hidden_dim//2+512+output_dim
+            dec_dims = z_dim + hidden_dim//2 + 512
             
+            #self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
+        
 
         ############################
         # Input Features Embedding #
         ############################
         #hidden_dims = input_dim + output_dim + map_encoding_dim
+
+        ################# NO MAPS
+        #enc_dims = hidden_dim + output_dim
+        #dec_dims = hidden_dim + z_dim
+        ###############
         self.embedding_h = nn.Linear(input_dim, hidden_dim//2)
-        enc_dims = hidden_dim//2*2+output_dim
         self.embedding_e = nn.Linear(ew_dims, enc_dims) 
         
 
@@ -119,7 +126,6 @@ class VAE_GNN(nn.Module):
         #############
         #  DECODER  #
         #############
-        dec_dims = z_dim + hidden_dim//2*2
         self.embedding_e_dec = nn.Linear(ew_dims, dec_dims)   
         self.GNN_decoder = GAT_VAE(dec_dims, dropout=dropout, feat_drop=feat_drop, attn_drop=attn_drop, heads=heads, att_ew=False, ew_dims=ew_dims) #If att_ew --> embedding_e_dec
         self.MLP_decoder = nn.Sequential(
@@ -171,9 +177,8 @@ class VAE_GNN(nn.Module):
         g.edata['w']=e
 
         #Map Encoding
-        if self.map_encoding:
-            # Maps feature extraction
-            maps_emb = self.map_feature_extractor(maps)
+        # Maps feature extraction
+        maps_emb = self.map_feature_extractor(maps)
 
         #Sample from gaussian distribution (BV, Z_dim)
         z_sample = torch.distributions.Normal(torch.zeros((feats.shape[0],self.z_dim), dtype=feats.dtype, device=feats.device), 
@@ -197,13 +202,13 @@ class VAE_GNN(nn.Module):
         g.edata['w']=e
 
         # Map encoding
-        if self.map_encoding:
-            # Maps feature extraction
-            maps_emb = self.map_feature_extractor(maps)
+        
+        # Maps feature extraction
+        maps_emb = self.map_feature_extractor(maps)
 
-            # Embeddings concatenation
-            h = torch.cat([maps_emb.squeeze(), h_emb, gt], dim=-1)
-            #h = self.linear_cat(h)
+        # Embeddings concatenation
+        h = torch.cat([maps_emb.squeeze(), h_emb, gt], dim=-1)
+        #h = self.linear_cat(h)
 
 
         # ENCODE

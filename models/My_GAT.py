@@ -206,7 +206,7 @@ class My_GAT(nn.Module):
     
     def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., 
                 attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True,
-                ew_type=False,  backbone='mobilenet', pretrained=False):
+                ew_type=False,  backbone='mobilenet', freeze=False):
         super().__init__()
 
         self.heads = heads
@@ -214,17 +214,18 @@ class My_GAT(nn.Module):
         ###############
         # Map Encoder #
         ###############
+        
         if backbone == 'map_encoder':            
             self.feature_extractor = MapEncoder(input_channels = 3, input_size=224, 
                                                     hidden_channels = [10,20,10,1], output_size = hidden_dim//2, 
                                                     kernels = [5,5,5,3], strides = [2,2,1,1])
         elif backbone == 'mobilenet':       
-            if not pretrained:
-                self.feature_extractor = mobilenet_v2(pretrained=False, num_classes=512)
+            if not freeze:
+                self.feature_extractor = mobilenet_v2(pretrained=True, num_classes=512)
             else:
-                self.feature_extractor = mobilenet_v2(pretrained=pretrained)
+                self.feature_extractor = mobilenet_v2(pretrained=True)
                 self.feature_extractor.classifier[1] = nn.Linear(in_features=self.feature_extractor.classifier[1].in_features, out_features=512)
-                if pretrained:
+                if freeze:
                     ct=0 
                     for child in self.feature_extractor.features:
                         ct+=1
@@ -232,21 +233,22 @@ class My_GAT(nn.Module):
                             for param in child.parameters():
                                 param.requires_grad = False
         else:       
-            model_ft = resnet18(pretrained=pretrained)
+            model_ft = resnet18(pretrained=True)
             self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1]) 
-            if pretrained:
+            if freeze:
                 ct=0
                 for child in self.feature_extractor.children():
-                    #ct+=1
-                    #if ct < 7:
-                    for param in child.parameters():
-                        param.requires_grad = False
+                    ct+=1
+                    if ct < 7:
+                        for param in child.parameters():
+                            param.requires_grad = False
             
             
-        #self.linear_cat = nn.Linear(hidden_dim+512, hidden_dim) 
+         
             
-        self.embedding_h = nn.Linear(input_dim, hidden_dim//2)
-        hidden_dim = hidden_dim//2*2
+        self.embedding_h = nn.Linear(input_dim, hidden_dim)###//2)
+        #hidden_dim = hidden_dim//2+512
+        self.linear_cat = nn.Linear(hidden_dim+512, hidden_dim)
         self.embedding_e = nn.Linear(2, hidden_dim) if  ew_type else nn.Linear(1, hidden_dim)
 
         if heads == 1:
@@ -287,8 +289,8 @@ class My_GAT(nn.Module):
 
         # Embeddings concatenation
         h = torch.cat([maps_embedding.squeeze(dim=-1).squeeze(dim=-1), h], dim=-1)
-        #h = self.linear_cat(h)
-        #h = F.relu(h)
+        h = self.linear_cat(h)
+        h = F.relu(h)
 
         # GAT Layers
         g.edata['w']=e
@@ -308,14 +310,15 @@ if __name__ == '__main__':
     hidden_dims = 1024
     heads = 3
 
-    input_dim = 7*history_frames
+    input_dim = 9*history_frames
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='map_encoder', pretrained=True)
+    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, 
+                   dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='resnet18', freeze=True)
     summary(model.feature_extractor, input_size=(3,224,224), device='cpu')
 
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=True, history_frames=history_frames, future_frames=future_frames, map_encodding=True) 
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=True, history_frames=history_frames, future_frames=future_frames) 
     test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
 
     for batch in test_dataloader:
