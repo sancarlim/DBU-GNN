@@ -27,7 +27,7 @@ total_frames = history_frames + future_frames #2s of history + 6s of prediction
 max_num_objects = 150 
 total_feature_dimension = 16
 base_path = '/media/14TBDISK/sandra/nuscenes_processed'
-map_base_path = os.path.join(base_path, 'hd_maps_step2_5parked')
+map_base_path = os.path.join(base_path, 'hd_maps_step2_4parked')
 
 def collate_batch(samples):
     graphs, masks, feats, gt, maps = map(list, zip(*samples))  # samples is a list of tuples
@@ -58,14 +58,14 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.types = rel_types
-        self.raw_dir = os.path.join(base_path, 'nuscenes_challenge_global_step2_seq_'+self.train_val_test+'.pkl' )
+        self.raw_dir = os.path.join(base_path, 'nuscenes_challenge_global_step2_seq_'+ train_val_test +'.pkl' )
         self.challenge_eval = challenge_eval
         self.transform = transforms.Compose(
                             [
-                                transforms.ToTensor()
+                                transforms.ToTensor(),
                                 #transforms.Grayscale(),
-                                #transforms.Normalize((0.375, 0.37, 0.46), (0.465, 0.465, 0.485))
-                                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))   #Imagenet
+                                transforms.Normalize((0.312,0.307,0.377), (0.447,0.447,0.471))
+                                #transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))   #Imagenet
                                 #transforms.Normalize((0.37), (0.43)),
                             ]
                         )
@@ -142,18 +142,19 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
             maps = pickle.load(reader)  # [N_agents][3, 112,112] list of tensors
         # img=((maps[6]-maps[6].min())*255/(maps[6].max()-maps[6].min())).numpy().transpose(1,2,0)
         # cv2.imwrite('input_276_6.png',cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-        maps=torch.vstack([transform(map_i.transpose(1,2,0)).unsqueeze(0) for map_i in map])
+        maps=torch.vstack([self.transform(map_i.transpose(1,2,0)).unsqueeze(0) for map_i in maps])
 
         if self.challenge_eval:
             return graph, output_mask, feats, gt, self.all_tokens[idx], int(self.scene_ids[idx]), self.all_mean_xy[idx,:2], hd_maps            
             
-        return graph, output_mask, feats, gt, hd_maps
+        return graph, output_mask, feats, gt, maps
 
 if __name__ == "__main__":
     
-    train_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=False)  #3509
-    #test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat', classes=(1,2,3,4))  #1754
-    train_dataloader=iter(DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch) )
+    val_dataset = nuscenes_Dataset(train_val_test='val', challenge_eval=False)  #3509
+    train_dataset = nuscenes_Dataset(train_val_test='train', challenge_eval=False)  #3509
+    test_dataset = nuscenes_Dataset(train_val_test='test')  #1754
+    train_dataloader=iter(DataLoader(train_dataset, batch_size=1028, shuffle=False, collate_fn=collate_batch) )
     while(1):
         batched_graph, masks, snorm_n, snorm_e, feats, gt, maps = next(train_dataloader)
         print(feats.shape, batched_graph.num_nodes(), maps.shape)

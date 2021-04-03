@@ -104,9 +104,9 @@ class LitGNN(pl.LightningModule):
         if reconstruction_loss == 'huber':
             overall_sum_time, overall_num = self.huber_loss(pred, gt, mask, self.delta)  #T
         else:
-            overall_sum_time, overall_num,_ = self.compute_MSE(pred, gt, mask)  #T, (BV,T)
+            overall_sum_time, overall_num,_ = self.compute_RMSE(pred, gt, mask)  #T, (BV,T)
 
-        recons_loss = torch.sum(overall_sum_time/overall_num.sum(dim=-2)) // self.future_frames #T -> 1
+        recons_loss = torch.sum(overall_sum_time/overall_num.sum(dim=-2)) / self.future_frames #T -> 1
         #kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
         std = torch.exp(log_var / 2)
         kld_loss = kl_divergence(
@@ -178,7 +178,7 @@ class LitGNN(pl.LightningModule):
                 preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
             preds += last_loc
             #Compute error for this sample
-            _ , overall_num, x2y2_error = self.compute_MSE(preds, labels_pos, output_masks)
+            _ , overall_num, x2y2_error = self.compute_RMSE(preds, labels_pos, output_masks)
             ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
             ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
             fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
@@ -203,16 +203,16 @@ def main(args: Namespace):
 
     seed=seed_everything(0)
 
-    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps) #3447
-    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #919
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #230
+    train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
+    val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
+    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout, 
-                             ew_dims=args.ew_dims, backbone=args.backbone)
+                             ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained)
     else:
-        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, 
-                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone)
+        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop,
+                        attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained)
 
     LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, wandb= not args.nowandb)
@@ -224,7 +224,7 @@ def main(args: Namespace):
         run=wandb.init(job_type="training", entity='sandracl72', project='nuscenes')  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
-        wandb_logger.watch(LitGNN_sys.model, log='gradients')  #log='all' for params & grads
+        wandb_logger.watch(LitGNN_sys.model, log='all')  #log='all' for params & grads
         if os.environ.get('WANDB_SWEEP_ID') is not None: 
             ckpt_folder = os.path.join(os.environ.get('WANDB_SWEEP_ID'), run.name)
         else:
@@ -268,6 +268,7 @@ if __name__ == '__main__':
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
                                         choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument('--pretrained', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.25)

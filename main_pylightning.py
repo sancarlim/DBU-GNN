@@ -142,7 +142,7 @@ class LitGNN(pl.LightningModule):
         gt = gt*mask  # outputmask BV,T,C
         #x2y2_error= torch.sum(torch.where(torch.abs(gt-pred) > 1 , (gt-pred)**2, torch.abs(gt - pred)), dim=-1) 
         x2y2_error=torch.sum((pred-gt)**2,dim=-1) # x^2+y^2 BV,T  PROBABILISTIC -> gt[:,:,:2]
-        overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
+        overall_sum_time = (x2y2_error**0.5).sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
         overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
         
         return overall_sum_time, overall_num, x2y2_error
@@ -382,9 +382,9 @@ def main(args: Namespace):
     else:
         history_frames = 4
         future_frames = 12
-        train_dataset = nuscenes_Dataset( train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps) #3447
-        val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #919
-        test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #230
+        train_dataset = nuscenes_Dataset( train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
+        val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
+        test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
         input_dim = 9
 
 
@@ -397,7 +397,7 @@ def main(args: Namespace):
     elif args.model_type == 'gat':
         hidden_dims = round(args.hidden_dims // args.heads)
         model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
-                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone, pretrained=args.pretrained)
+                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone, freeze=args.freeze)
     elif args.model_type == 'gcn':
         model = model = GCN(in_feats=input_dim_model, hid_feats=args.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn, embedding=config.embedding)
     elif args.model_type == 'gated':
@@ -420,7 +420,7 @@ def main(args: Namespace):
         run=wandb.init(job_type="training", entity='sandracl72', project='nuscenes')  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
-        wandb_logger.watch(LitGNN_sys.model)  #log='all' for params & grads
+        wandb_logger.watch(LitGNN_sys.model, log='all')  #log='all' for params & grads
         if os.environ.get('WANDB_SWEEP_ID') is not None: 
             ckpt_folder = os.path.join(os.environ.get('WANDB_SWEEP_ID'), run.name)
         else:
@@ -458,16 +458,16 @@ if __name__ == '__main__':
     parser.add_argument("--lr", type=float, default=5e-5, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
     parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
-    parser.add_argument("--hidden_dims", type=int, default=768)
+    parser.add_argument("--hidden_dims", type=int, default=786)
     parser.add_argument("--model_type", type=str, default='gat', help="Choose model type / aggregation function.")
     parser.add_argument("--dataset", type=str, default='nuscenes', help="Choose dataset.",
                                         choices=['nuscenes', 'ind', 'apollo'])
     parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
                                         choices=['mobilenet', 'resnet18', 'map_encoder'])
-    parser.add_argument('--pretrained', type=str2bool, nargs='?', const=True, default=True, help='use pretrained backbone (Imagenet).')
+    parser.add_argument('--freeze', type=str2bool, nargs='?', const=True, default=True, help='freeze first pretrained layers (Imagenet).')
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
-    parser.add_argument("--attn_drop", type=float, default=0.25)
+    parser.add_argument("--attn_drop", type=float, default=0.4)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument("--alfa", type=float, default=0, help='Weighting factor of the overlap loss term')
     parser.add_argument("--beta", type=float, default=0, help='Weighting factor of the FDE loss term')
