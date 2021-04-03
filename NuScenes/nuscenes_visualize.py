@@ -73,10 +73,12 @@ min_diff_patch = 30
 
 
 def collate_batch(samples):
-    graphs, masks, feats, gt, tokens, mean_xy = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
+    graphs, masks, feats, gt, tokens, scene_ids, mean_xy, maps = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
     masks = torch.vstack(masks)
     feats = torch.vstack(feats)
     gt = torch.vstack(gt).float()
+    if maps[0] is not None:
+        maps = torch.vstack(maps)
     sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
     snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
     snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
@@ -84,14 +86,14 @@ def collate_batch(samples):
     snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
     snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
     batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt, tokens[0], mean_xy
+    return batched_graph, masks, snorm_n, snorm_e, feats, gt, tokens[0], scene_ids[0], mean_xy, maps
 
 
 
 class LitGNN(pl.LightningModule):
     def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, 
                     batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, 
-                    scale_factor=1):
+                    scale_factor=1, scene_id : int = 927):
         super().__init__()
         self.model= model
         self.history_frames =history_frames
@@ -100,6 +102,7 @@ class LitGNN(pl.LightningModule):
         self.test_dataset = test_dataset
         self.rel_types = rel_types
         self.scale_factor = scale_factor
+        self.scene_id = scene_id
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -120,7 +123,9 @@ class LitGNN(pl.LightningModule):
         pass
          
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, tokens_eval, mean_xy = test_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, tokens_eval, scene_id, mean_xy, maps = test_batch
+        if scene_id != self.scene_id:
+            return 
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
         last_loc = last_loc*rescale_xy       
@@ -132,7 +137,7 @@ class LitGNN(pl.LightningModule):
         prediction_all_agents = []  # [num_agents, num_modes, n_timesteps, state_dim]
         for i in range(25):
             #Model predicts relative_positions
-            preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e)  # [N_agents, 12, 2]
+            preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e,maps)  # [N_agents, 12, 2]
             preds=preds.view(preds.shape[0],self.future_frames,-1)  
             #Convert prediction to absolute positions
             for j in range(1,labels_pos.shape[1]):
@@ -302,7 +307,7 @@ def main(args: Namespace):
         model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims)
 
     LitGNN_sys = LitGNN(model=model, history_frames=history_frames, future_frames= future_frames, train_dataset=None, val_dataset=None,
-                 test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+                 test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, scene_id=args.scene_id)
       
     trainer = pl.Trainer(gpus=1, deterministic=True,  profiler=True) 
  
@@ -320,7 +325,7 @@ if __name__ == '__main__':
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
     parser.add_argument("--z_dims", type=int, default=32, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=256)
+    parser.add_argument("--hidden_dims", type=int, default=512)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -330,6 +335,11 @@ if __name__ == '__main__':
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
     parser.add_argument('--ckpt', type=str, default=None, help='ckpt path.')   
     parser.add_argument('--nowandb', action='store_true')
+
+    parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=True, help="Add HD Maps.")
+    parser.add_argument("--backbone", type=str, default='map_encoder', help="Choose CNN backbone.",
+                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument("--scene_id", type=int, default=927, help="Scene id to visualize.")
     
     hparams = parser.parse_args()
 

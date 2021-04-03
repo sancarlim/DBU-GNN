@@ -41,16 +41,16 @@ nuscenes = NuScenes('v1.0-trainval', dataroot=DATAROOT)   #850 scenes
 # Helper for querying past and future data for an agent.
 helper = PredictHelper(nuscenes)
 base_path = '/media/14TBDISK/sandra/nuscenes_processed'
-base_path_map = os.path.join(base_path, 'hd_maps_t')
+base_path_map = os.path.join(base_path, 'hd_maps_step2_4parked')
 
 static_layer_rasterizer = StaticLayerRasterizer(helper)
 agent_rasterizer = AgentBoxesWithFadedHistory(helper, seconds_of_history=1)
 input_representation = InputRepresentation(static_layer_rasterizer, agent_rasterizer, Rasterizer())
 transform = transforms.Compose(
                             [
-                                transforms.ToTensor(),
-                                transforms.Resize((112,112)),
-                                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+                                #transforms.ToTensor(),
+                                transforms.Resize((112,112), interpolation=3),
+                                #transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
                             ]
                         )
 
@@ -78,33 +78,6 @@ def pol2cart(th, r):
 
     cart = np.array([x, y]).transpose()
     return cart
-
-def make_continuous_copy(alpha):
-    alpha = (alpha + np.pi) % (2.0 * np.pi) - np.pi
-    continuous_x = np.zeros_like(alpha)
-    continuous_x[0] = alpha[0]
-    for i in range(1, len(alpha)):
-        if not (np.sign(alpha[i]) == np.sign(alpha[i - 1])) and np.abs(alpha[i]) > np.pi / 2:
-            continuous_x[i] = continuous_x[i - 1] + (
-                    alpha[i] - alpha[i - 1]) - np.sign(
-                (alpha[i] - alpha[i - 1])) * 2 * np.pi
-        else:
-            continuous_x[i] = continuous_x[i - 1] + (alpha[i] - alpha[i - 1])
-
-    return continuous_x
-
-
-def derivative_of(x, dt=1, radian=False):
-    if radian:
-        x = make_continuous_copy(x)
-
-    if x[~np.isnan(x)].shape[-1] < 2:
-        return np.zeros_like(x)
-
-    dx = np.full_like(x, np.nan)
-    dx[~np.isnan(x)] = np.gradient(x[~np.isnan(x)], dt)
-
-    return dx
 
 def cart2pol(cart):
     """
@@ -267,6 +240,7 @@ def process_scene(scene):
     sample = nuscenes.get('sample', sample_token)
     frame_id = 0
     mean_xy = []
+    parked = 0
     while sample['next']:
         annotations = helper.get_annotations_for_sample(sample_token)
         for i,annotation in enumerate(annotations):
@@ -282,8 +256,13 @@ def process_scene(scene):
                 node_type = 2
             elif 'bicycle' in category or 'motorcycle' in category:
                 node_type = 3
-            elif 'vehicle' in category: # and 'parked' not in attribute: #filter parked vehicles                
+            elif 'vehicle' in category: #filter parked vehicles                
                 node_type = 1
+                if 'parked' in attribute:
+                    parked += 1
+                    # Keep only 5 parked maximum per sequence
+                    if parked > 4:
+                        continue
             else:
                 continue
 
@@ -315,6 +294,7 @@ def process_scene(scene):
         sample = nuscenes.get('sample', sample['next'])
         sample_token = sample['token']
         frame_id += 1
+        parked = 0
         '''
         #Zero-centralization per frame (sequence)
         mean_xy.append([data['x_global'].mean(),data['y_global'].mean()])
@@ -356,7 +336,7 @@ def process_scene(scene):
     tokens_list = []
     maps_list = []
     visible_object_indexes_list=[]
-    step=4 #iterate over 2s
+    step=2 #iterate over 2s
     for start_ind in frame_id_list[:-total_frames+1:step]:
         current_frame = start_ind + history_frames -1   #0,8,16,24
         end_ind = start_ind + total_frames
@@ -365,12 +345,11 @@ def process_scene(scene):
         #HD MAPs
         sample_token = tracks[current_frame]['sample_token'][0]
         
-        #maps = [ transform(torch.tensor(input_representation.make_input_representation(instance, sample_token).transpose(2,0,1),dtype=torch.uint8)).numpy() for instance in tracks[current_frame]["node_id"]]  #[N_agents][3,112,112] list of np.uint8 range [0,255] -> Dataloader: torch.float32 , /255 
+        #maps = [transform(input_representation.make_input_representation(instance, sample_token)) for instance in tracks[current_frame]["node_id"]]   #Tensor [N_agents,3,112,112] float32 [0,1]       
         
-        
-        maps = [transform(input_representation.make_input_representation(instance, sample_token)) for instance in tracks[current_frame]["node_id"]]   #Tensor [N_agents,3,112,112] float32 [0,1]
-        
-        #maps = np.array( [input_representation.make_input_representation(instance, sample_token) for instance in tracks[current_frame]["node_id"]] )   #[N_agents,500,500,3] uint8 range [0,256] 
+        maps = np.array( [input_representation.make_input_representation(instance, sample_token) for instance in tracks[current_frame]["node_id"]] )   #[N_agents,500,500,3] uint8 range [0,256] 
+        maps = np.array( transform(torch.tensor(maps.transpose(0,3,1,2))) ).transpose(0,2,3,1)
+
         save_path_map = os.path.join(base_path_map, sample_token + '.pkl')
         with open(save_path_map, 'wb') as writer:
             pickle.dump(maps,writer)  
@@ -386,10 +365,8 @@ def process_scene(scene):
     all_feature = np.array(all_feature_list)
     tokens = np.array(tokens_list, dtype=object)
     return all_feature, all_adjacency, all_mean, tokens
+    
     '''
-    all_maps = np.array(maps_list)  #[N_seq, max_num_objects, 3, 500, 500]
-    return all_maps
-
     
     # Generate Maps
     map_name = nuscenes.get('log', scene['log_token'])['location']
@@ -411,7 +388,7 @@ def process_scene(scene):
 
 
 # Data splits for the CHALLENGE - returns instance and sample token  
-
+'''
 # Train: 5883 seq (475 scenes) Train_val: 2219 seq (185 scenes)  Val: 1682 seq (138 scenes) 
 ns_scene_names = dict()
 ns_scene_names['train'] = get_prediction_challenge_split("train", dataroot=DATAROOT) 
@@ -421,7 +398,7 @@ ns_scene_names['test'] = get_prediction_challenge_split("val", dataroot=DATAROOT
 
 
 #scenes_df=[]
-for data_class in ['val']:
+for data_class in ['train']:
     scenes=[]
     for ann in ns_scene_names[data_class]:
         _, sample_token=ann.split("_")
@@ -433,22 +410,11 @@ for data_class in ['val']:
     all_adjacency = []
     all_mean_xy = []
     all_tokens = []
-    '''
-    for scene_token in scenes_token_set:
-        maps_sc = process_scene(nuscenes.get('scene', scene_token))
-        print(f"Scene {nuscenes.get('scene', scene_token)['name']} processed! {maps_sc.shape[0]} sequences of 8 seconds.")
-        all_maps.extend(maps_sc)
-
-    all_maps = np.array(all_maps)
-    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_8s_hd_maps_' + data_class + '.pkl'
-    with open(save_path, 'wb') as writer:
-        pickle.dump(all_maps, writer, protocol=4)  #Need protocol=4 for large objects (>4Gb)
-    print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
-
-    '''
+    
     for scene_token in scenes_token_set:
         all_feature_sc, all_adjacency_sc, all_mean_sc, tokens_sc = process_scene(nuscenes.get('scene', scene_token))
         print(f"Scene {nuscenes.get('scene', scene_token)['name']} processed! {all_adjacency_sc.shape[0]} sequences of 8 seconds.")
+    
         all_data.extend(all_feature_sc)
         all_adjacency.extend(all_adjacency_sc)
         all_mean_xy.extend(all_mean_sc)
@@ -459,14 +425,12 @@ for data_class in ['val']:
     all_adjacency = np.array(all_adjacency) 
     all_mean_xy = np.array(all_mean_xy) 
     all_tokens = np.array(all_tokens)
-    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_8s_seq_' + data_class + '.pkl'
-    #save_path_map = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_8s_seq_' + data_class + '_map.pkl'
+    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_' + data_class + '.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
     print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
-    
+'''    
 
-'''
 #Usual split: Train 8536 (700 scenes)  Val: 1828 (150 scenes)
 splits = create_splits_scenes()
 ns_scene_names = dict()
@@ -474,7 +438,7 @@ ns_scene_names['train'] =  splits['train']
 ns_scene_names['val'] =  splits['val']
 ns_scene_names['test'] = splits['test']
 
-for data_class in ['train', 'val', 'test']:
+for data_class in ['test']:
     all_data=[]
     all_adjacency=[]
     all_mean_xy=[]
@@ -491,8 +455,17 @@ for data_class in ['train', 'val', 'test']:
         all_adjacency.extend(all_adjacency_sc)
         all_mean_xy.extend(all_mean_sc)
         all_tokens.extend(tokens_sc)
-'''
-    
+
+all_data = np.array(all_data)  
+all_adjacency = np.array(all_adjacency) 
+all_mean_xy = np.array(all_mean_xy) 
+all_tokens = np.array(all_tokens)
+save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_' + data_class + '.pkl'
+with open(save_path, 'wb') as writer:
+    pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
+print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
+  
+
 
 #To return the past/future data for the entire sample (local/global - in_agent_frame=T/F)
 #sample_ann = helper.get_annotations_for_sample(sample_token)
