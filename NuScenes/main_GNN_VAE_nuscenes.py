@@ -38,9 +38,9 @@ output_dim = future_frames*2
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, 
-                       batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, 
-                       scale_factor:int = 1, wandb: bool = True):
+    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, 
+                    lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., 
+                    rel_types: bool = False, scale_factor: int = 1, wandb : bool = True):
         super().__init__()
         self.model= model
         self.lr = lr
@@ -85,7 +85,7 @@ class LitGNN(pl.LightningModule):
         pred = pred*mask #B*V,T,C  (B n grafos en el batch)
         gt = gt*mask  # outputmask BV,T,C
         x2y2_error=torch.sum((pred-gt)**2,dim=-1) # x^2+y^2 BV,T  PROBABILISTIC -> gt[:,:,:2]
-        overall_sum_time = x2y2_error.sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
+        overall_sum_time = (x2y2_error**0.5).sum(dim=-2)  #T - suma de los errores (x^2+y^2) de los BV agentes
         overall_num = mask.sum(dim=-1).type(torch.int)  #torch.Tensor[(BV,T)] - num de agentes (Y CON DATOS) en cada frame
         return overall_sum_time, overall_num, x2y2_error
 
@@ -104,9 +104,9 @@ class LitGNN(pl.LightningModule):
         if reconstruction_loss == 'huber':
             overall_sum_time, overall_num = self.huber_loss(pred, gt, mask, self.delta)  #T
         else:
-            overall_sum_time, overall_num,_ = self.compute_RMSE(pred, gt, mask)  #T
+            overall_sum_time, overall_num,_ = self.compute_MSE(pred, gt, mask)  #T, (BV,T)
 
-        recons_loss = torch.sum(overall_sum_time)/torch.sum(overall_num.sum(dim=-2)) #T -> 1
+        recons_loss = torch.sum(overall_sum_time/overall_num.sum(dim=-2)) // self.future_frames #T -> 1
         #kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
         std = torch.exp(log_var / 2)
         kld_loss = kl_divergence(
@@ -178,7 +178,7 @@ class LitGNN(pl.LightningModule):
                 preds[:,j,:] = torch.sum(preds[:,j-1:j+1,:],dim=-2) #6,2 
             preds += last_loc
             #Compute error for this sample
-            _ , overall_num, x2y2_error = self.compute_RMSE(preds, labels_pos, output_masks)
+            _ , overall_num, x2y2_error = self.compute_MSE(preds, labels_pos, output_masks)
             ade_ts = torch.sum((x2y2_error**0.5), dim=0) / torch.sum(overall_num, dim=0)   
             ade_s = torch.sum(ade_ts)/ self.future_frames  #T ->1
             fde_s = torch.sum((x2y2_error**0.5), dim=0)[-1] / torch.sum(overall_num, dim=0)[-1]
@@ -208,18 +208,20 @@ def main(args: Namespace):
     test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames, map_encodding=args.maps)  #230
 
     if args.model_type == 'vae_gated':
-        model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims, map_encoding=args.maps)
+        model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout, 
+                             ew_dims=args.ew_dims, backbone=args.backbone)
     else:
-        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, map_encoding=args.maps)
+        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, 
+                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone)
 
     LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
-    train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+    train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, wandb= not args.nowandb)
     
     
     early_stop_callback = EarlyStopping('Sweep/val_loss', patience=4)
 
     if not args.nowandb:
-        run=wandb.init(job_type="training")  
+        run=wandb.init(job_type="training", entity='sandracl72', project='nuscenes')  
         wandb_logger = pl_loggers.WandbLogger() 
         wandb_logger.experiment.log({'seed': seed}) 
         wandb_logger.watch(LitGNN_sys.model, log='gradients')  #log='all' for params & grads
@@ -260,18 +262,18 @@ if __name__ == '__main__':
     parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
     parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
     parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
-    parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
+    parser.add_argument("--z_dims", type=int, default=32, help="Dimensionality of the latent space")
     parser.add_argument("--hidden_dims", type=int, default=1024)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
-    parser.add_argument("--backbone", type=str, default='mobilenet', help="Choose CNN backbone.",
+    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
                                         choices=['mobilenet', 'resnet18', 'map_encoder'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.25)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument("--beta", type=float, default=1.0, help='Weighting factor of the KL divergence loss term')
-    parser.add_argument("--delta", type=float, default=1.0, help='Delta factor in Huber Loss (Reconstruction Loss)')
+    parser.add_argument("--delta", type=float, default=.01, help='Delta factor in Huber Loss (Reconstruction Loss)')
     #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
     
