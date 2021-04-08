@@ -106,7 +106,7 @@ class LitGNN(pl.LightningModule):
         else:
             overall_sum_time, overall_num,_ = self.compute_RMSE(pred, gt, mask)  #T, (BV,T)
 
-        recons_loss = torch.sum(overall_sum_time/overall_num.sum(dim=-2)) / self.future_frames #T -> 1
+        recons_loss = torch.sum(overall_sum_time/overall_num.sum(dim=-2)) #T -> 1
         #kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
         std = torch.exp(log_var / 2)
         kld_loss = kl_divergence(
@@ -128,7 +128,7 @@ class LitGNN(pl.LightningModule):
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, labels, maps)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         
-        total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta)
+        total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='huber')
 
         self.log_dict({f"Sweep/train_{k}": v for k,v in logs.items()}, on_step=False, on_epoch=True)
         return total_loss
@@ -212,7 +212,8 @@ def main(args: Namespace):
                              ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained)
     else:
         model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop,
-                        attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained)
+                        attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained,
+                        bn=(args.norm=='bn'), gn=(args.norm=='gn'))
 
     LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, wandb= not args.nowandb)
@@ -266,8 +267,9 @@ if __name__ == '__main__':
     parser.add_argument("--hidden_dims", type=int, default=1024)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
-    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
-                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument("--backbone", type=str, default='resnet', help="Choose CNN backbone.",
+                                        choices=['resnet_gray', 'resnet', 'map_encoder'])
+    parser.add_argument("--norm", type=str, default=None, help="Wether to apply BN (bn) or GroupNorm (gn).")
     parser.add_argument('--pretrained', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)

@@ -13,12 +13,10 @@ from inD_Dataset import inD_DGLDataset
 from roundD_Dataset import roundD_DGLDataset
 from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
 from models.GCN import GCN 
-from models.My_GAT import My_GAT
+from models.scout import SCOUT
 from models.SCOUT_MDN import SCOUT_MDN
 from models.Gated_MDN import Gated_MDN
 from models.Gated_GCN import GatedGCN
-from models.gnn_rnn import Model_GNN_RNN
-from models.rnn_baseline import RNN_baseline
 from models.RGCN import RGCN
 import random
 import wandb
@@ -351,14 +349,14 @@ class LitGNN(pl.LightningModule):
             overall_lat_err = np.array(self.overall_lat_err_list)
             avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
             var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(len(overall_lat_err[0]))]
-            print('\n'.join('Long avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-            print('\n'.join('Lat avg error in sec {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+            print('\n'.join('Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+            print('\n'.join('Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
-            self.log_dict({ "test/var_s1": torch.tensor(var[0]), "test/var_s2": torch.tensor(var[1]),"test/var_s3": torch.tensor(var[2])})
+            self.log_dict({ "test/var_s1": torch.tensor(var[1]), "test/var_s2": torch.tensor(var[3]),"test/var_s3": torch.tensor(var[5])})
             if self.future_frames == 5:
                 self.log_dict({"var_s4": torch.tensor(var[3]), "var_s5": torch.tensor(var[-1])})
             elif self.future_frames == 12:
-                self.log_dict({"test/var_2": torch.tensor(var[4:5]), "test/var_2.8": torch.tensor(var[6:7]), "test/var_4": torch.tensor(var[9:10]), "test/var_4.8": torch.tensor(var[-1:]) }) #, sync_dist=True
+                self.log_dict({"test/var_4": torch.tensor(var[7]), "test/var_5": torch.tensor(var[9]), "test/var_6": torch.tensor(var[-1:]) }) #, sync_dist=True
 
 def main(args: Namespace):
     seed=seed_everything(121958)
@@ -396,7 +394,7 @@ def main(args: Namespace):
         model = SCOUT_MDN(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, bn=False, feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1)
     elif args.model_type == 'gat':
         hidden_dims = round(args.hidden_dims // args.heads)
-        model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
+        model = SCOUT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, bn=(args.norm=='bn'), gn=(args.norm=='gn'),
                         feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone, freeze=args.freeze)
     elif args.model_type == 'gcn':
         model = model = GCN(in_feats=input_dim_model, hid_feats=args.hidden_dims, out_feats=output_dim, dropout=config.dropout, gcn_drop=config.gcn_drop, bn=config.bn, gcn_bn=config.gcn_bn, embedding=config.embedding)
@@ -462,8 +460,9 @@ if __name__ == '__main__':
     parser.add_argument("--model_type", type=str, default='gat', help="Choose model type / aggregation function.")
     parser.add_argument("--dataset", type=str, default='nuscenes', help="Choose dataset.",
                                         choices=['nuscenes', 'ind', 'apollo'])
-    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
-                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument("--norm", type=str, default=None, help="Wether to apply BN or GroupNorm.")
+    parser.add_argument("--backbone", type=str, default='resnet', help="Choose CNN backbone.",
+                                        choices=['resnet_gray', 'resnet', 'map_encoder'])
     parser.add_argument('--freeze', type=str2bool, nargs='?', const=True, default=True, help='freeze first pretrained layers (Imagenet).')
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
