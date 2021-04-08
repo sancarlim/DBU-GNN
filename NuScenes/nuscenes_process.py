@@ -41,10 +41,10 @@ nuscenes = NuScenes('v1.0-trainval', dataroot=DATAROOT)   #850 scenes
 # Helper for querying past and future data for an agent.
 helper = PredictHelper(nuscenes)
 base_path = '/media/14TBDISK/sandra/nuscenes_processed'
-base_path_map = os.path.join(base_path, 'hd_maps_step2_4parked')
+base_path_map = os.path.join(base_path, 'hd_maps_step2_4parked_2s')
 
 static_layer_rasterizer = StaticLayerRasterizer(helper)
-agent_rasterizer = AgentBoxesWithFadedHistory(helper, seconds_of_history=1)
+agent_rasterizer = AgentBoxesWithFadedHistory(helper, seconds_of_history=2)
 input_representation = InputRepresentation(static_layer_rasterizer, agent_rasterizer, Rasterizer())
 transform = transforms.Compose(
                             [
@@ -241,6 +241,7 @@ def process_scene(scene):
     frame_id = 0
     mean_xy = []
     parked = 0
+    standing = 0
     while sample['next']:
         annotations = helper.get_annotations_for_sample(sample_token)
         for i,annotation in enumerate(annotations):
@@ -252,9 +253,13 @@ def process_scene(scene):
             else:
                 continue
 
-            if 'pedestrian' in category and not 'stroller' in category and not 'wheelchair' in category:
+            if 'pedestrian' in category and not 'stroller' in category and not 'wheelchair' in category:# and 'sitting_lying_down' not in attribute:
+                #if 'standing' in attribute:
+                #    standing +=1
+                #    if standing > 2:
+                #        continue
                 node_type = 2
-            elif 'bicycle' in category or 'motorcycle' in category:
+            elif 'bicycle' in category or 'motorcycle' in category: #and 'without_rider' not in attribute:
                 node_type = 3
             elif 'vehicle' in category: #filter parked vehicles                
                 node_type = 1
@@ -295,6 +300,7 @@ def process_scene(scene):
         sample_token = sample['token']
         frame_id += 1
         parked = 0
+        standing = 0
         '''
         #Zero-centralization per frame (sequence)
         mean_xy.append([data['x_global'].mean(),data['y_global'].mean()])
@@ -341,7 +347,7 @@ def process_scene(scene):
         current_frame = start_ind + history_frames -1   #0,8,16,24
         end_ind = start_ind + total_frames
         object_frame_feature, neighbor_matrix, mean_xy, inst_sample_tokens = process_tracks(tracks, start_ind, end_ind, current_frame)  
-
+        
         #HD MAPs
         sample_token = tracks[current_frame]['sample_token'][0]
         
@@ -353,7 +359,8 @@ def process_scene(scene):
         save_path_map = os.path.join(base_path_map, sample_token + '.pkl')
         with open(save_path_map, 'wb') as writer:
             pickle.dump(maps,writer)  
-        
+            
+'''
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
         all_mean_list.append(mean_xy)
@@ -365,26 +372,7 @@ def process_scene(scene):
     all_feature = np.array(all_feature_list)
     tokens = np.array(tokens_list, dtype=object)
     return all_feature, all_adjacency, all_mean, tokens
-    
-    '''
-    
-    # Generate Maps
-    map_name = nuscenes.get('log', scene['log_token'])['location']
-    nusc_map = NuScenesMap(dataroot=DATAROOT, map_name=map_name)
-
-    type_map = dict()
-    x_size = x_max - x_min
-    y_size = y_max - y_min
-    patch_box = (x_min + 0.5 * (x_max - x_min), y_min + 0.5 * (y_max - y_min), y_size, x_size)
-    patch_angle = 0  # Default orientation where North is up
-    canvas_size = (np.round(3 * y_size).astype(int), np.round(3 * x_size).astype(int))
-    homography = np.array([[3., 0., 0.], [0., 3., 0.], [0., 0., 3.]])
-    layer_names = ['lane', 'road_segment', 'drivable_area', 'road_divider', 'lane_divider', 'stop_line',
-                   'ped_crossing', 'stop_line', 'ped_crossing', 'walkway']
-    map_mask = (nusc_map.get_map_mask(patch_box, patch_angle, layer_names, canvas_size) * 255.0).astype(
-        np.uint8)
-    map_mask = np.swapaxes(map_mask, 1, 2)  # x axis comes first
-    '''
+'''    
 
 
 # Data splits for the CHALLENGE - returns instance and sample token  
@@ -438,7 +426,7 @@ ns_scene_names['train'] =  splits['train']
 ns_scene_names['val'] =  splits['val']
 ns_scene_names['test'] = splits['test']
 
-for data_class in ['test']:
+for data_class in ['val']:
     all_data=[]
     all_adjacency=[]
     all_mean_xy=[]
@@ -449,6 +437,9 @@ for data_class in ['test']:
         scene_id = int(ns_scene['name'].replace('scene-', ''))
         if scene_id in scene_blacklist:  # Some scenes have bad localization
             continue
+        process_scene(ns_scene)
+        print(f"Scene {ns_scene_name} processed! ")
+'''
         all_feature_sc, all_adjacency_sc, all_mean_sc, tokens_sc = process_scene(ns_scene)
         print(f"Scene {ns_scene_name} processed! {all_adjacency_sc.shape[0]} sequences of 8 seconds.")
         all_data.extend(all_feature_sc)
@@ -460,12 +451,12 @@ all_data = np.array(all_data)
 all_adjacency = np.array(all_adjacency) 
 all_mean_xy = np.array(all_mean_xy) 
 all_tokens = np.array(all_tokens)
-save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_' + data_class + '.pkl'
+save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_trainandval_filter.pkl' #+ data_class + '.pkl'
 with open(save_path, 'wb') as writer:
     pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
 print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
   
-
+'''
 
 #To return the past/future data for the entire sample (local/global - in_agent_frame=T/F)
 #sample_ann = helper.get_annotations_for_sample(sample_token)
