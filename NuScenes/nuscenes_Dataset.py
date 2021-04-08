@@ -16,6 +16,7 @@ from torchvision import transforms
 import scipy.sparse as spp
 from dgl.data import DGLDataset
 from sklearn.preprocessing import StandardScaler
+import cv2
 
 FREQUENCY = 2
 dt = 1 / FREQUENCY
@@ -27,7 +28,7 @@ total_frames = history_frames + future_frames #2s of history + 6s of prediction
 max_num_objects = 150 
 total_feature_dimension = 16
 base_path = '/media/14TBDISK/sandra/nuscenes_processed'
-map_base_path = os.path.join(base_path, 'hd_maps_step2_4parked')
+map_base_path = os.path.join(base_path, 'hd_maps_step2_4parked_2s')
 
 def collate_batch(samples):
     graphs, masks, feats, gt, maps = map(list, zip(*samples))  # samples is a list of tuples
@@ -58,15 +59,17 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.history_frames = history_frames
         self.future_frames = future_frames
         self.types = rel_types
+        if train_val_test == 'train' or train_val_test == 'val':
+            train_val_test = 'trainandval_filter'
         self.raw_dir = os.path.join(base_path, 'nuscenes_challenge_global_step2_seq_'+ train_val_test +'.pkl' )
         self.challenge_eval = challenge_eval
         self.transform = transforms.Compose(
                             [
                                 transforms.ToTensor(),
-                                #transforms.Grayscale(),
-                                transforms.Normalize((0.312,0.307,0.377), (0.447,0.447,0.471))
+                                transforms.Grayscale(),
+                                #transforms.Normalize((0.312,0.307,0.377), (0.447,0.447,0.471))
                                 #transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))   #Imagenet
-                                #transforms.Normalize((0.37), (0.43)),
+                                transforms.Normalize((0.35), (0.43)), 
                             ]
                         )
         self.load_data()
@@ -76,6 +79,16 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         with open(self.raw_dir, 'rb') as reader:
             [all_feature, self.all_adjacency, self.all_mean_xy, self.all_tokens]= pickle.load(reader)
         self.all_feature=torch.from_numpy(all_feature).type(torch.float32)
+        if self.train_val_test == 'train':
+            self.all_feature= self.all_feature[:7000]
+            self.all_adjacency= self.all_adjacency[:7000]
+            self.all_mean_xy= self.all_mean_xy[:7000]
+            self.all_tokens= self.all_tokens[:7000]
+        elif self.train_val_test == 'val':
+            self.all_feature= self.all_feature[6000:]
+            self.all_adjacency= self.all_adjacency[6000:]
+            self.all_mean_xy= self.all_mean_xy[6000:]
+            self.all_tokens= self.all_tokens[6000:]
 
     def process(self):
         '''
@@ -97,7 +110,8 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         feature_id = list(range(0,9)) 
         self.track_info = self.all_feature[:,:,:,13:15]
         self.object_type = self.all_feature[:,:,now_history_frame,8].int()
-        self.scene_ids = self.all_feature[:,0,0,-3].numpy()
+        self.scene_ids = self.all_feature[:,0,now_history_frame,-3].numpy()
+        self.all_scenes = np.unique(self.scene_ids)
         self.num_visible_object = self.all_feature[:,0,now_history_frame,-1].int()   #Max=108 (train), 104(val), 83 (test)
         self.output_mask= self.all_feature[:,:,self.history_frames:,-2].unsqueeze_(-1)
         
@@ -140,12 +154,13 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         sample_token=str(self.all_tokens[idx][0,1])
         with open(os.path.join(map_base_path, sample_token + '.pkl'), 'rb') as reader:
             maps = pickle.load(reader)  # [N_agents][3, 112,112] list of tensors
-        # img=((maps[6]-maps[6].min())*255/(maps[6].max()-maps[6].min())).numpy().transpose(1,2,0)
-        # cv2.imwrite('input_276_6.png',cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-        maps=torch.vstack([self.transform(map_i.transpose(1,2,0)).unsqueeze(0) for map_i in maps])
-
+        
+        maps=torch.vstack([self.transform(map_i).unsqueeze(0) for map_i in maps])
+        #img=((maps[0]-maps[0].min())*255/(maps[0].max()-maps[0].min())).numpy().transpose(1,2,0)
+        #cv2.imwrite('input_276_0_gray'+sample_token+'.png',cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        
         if self.challenge_eval:
-            return graph, output_mask, feats, gt, self.all_tokens[idx], int(self.scene_ids[idx]), self.all_mean_xy[idx,:2], hd_maps            
+            return graph, output_mask, feats, gt, self.all_tokens[idx], int(self.scene_ids[idx]), self.all_mean_xy[idx,:2], maps            
             
         return graph, output_mask, feats, gt, maps
 
@@ -153,9 +168,9 @@ if __name__ == "__main__":
     
     val_dataset = nuscenes_Dataset(train_val_test='val', challenge_eval=False)  #3509
     train_dataset = nuscenes_Dataset(train_val_test='train', challenge_eval=False)  #3509
-    test_dataset = nuscenes_Dataset(train_val_test='test')  #1754
-    train_dataloader=iter(DataLoader(train_dataset, batch_size=1028, shuffle=False, collate_fn=collate_batch) )
+    test_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=True)  #1754
+    test_dataloader=iter(DataLoader(train_dataset, batch_size=4000, shuffle=False, collate_fn=collate_batch) )
     while(1):
-        batched_graph, masks, snorm_n, snorm_e, feats, gt, maps = next(train_dataloader)
+        batched_graph, masks, snorm_n, snorm_e, feats, gt, maps = next(test_dataloader)
         print(feats.shape, batched_graph.num_nodes(), maps.shape)
     
