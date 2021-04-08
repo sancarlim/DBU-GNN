@@ -9,6 +9,7 @@ os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 from nuscenes_Dataset import nuscenes_Dataset
 from models.VAE_GNN import VAE_GNN
+from models.My_GAT import My_GAT
 #from VAE_GATED import VAE_GATED
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
@@ -68,7 +69,7 @@ cars = [plt.imread('/home/sandra/PROGRAMAS/DBU_Graph/NuScenes/icons/Car TOP_VIEW
 
 scene_blacklist = [499, 515, 517]
 
-patch_margin = 2
+patch_margin = 10
 min_diff_patch = 30
 
 
@@ -91,7 +92,7 @@ def collate_batch(samples):
 
 
 class LitGNN(pl.LightningModule):
-    def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, 
+    def __init__(self, model, model_type, train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, lr: float = 1e-3, 
                     batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., rel_types: bool = False, 
                     scale_factor=1, scene_id : int = 927):
         super().__init__()
@@ -103,6 +104,7 @@ class LitGNN(pl.LightningModule):
         self.rel_types = rel_types
         self.scale_factor = scale_factor
         self.scene_id = scene_id
+        self.model_type = model_type
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -126,6 +128,8 @@ class LitGNN(pl.LightningModule):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, tokens_eval, scene_id, mean_xy, maps = test_batch
         if scene_id != self.scene_id:
             return 
+        
+        print(tokens_eval)
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
         last_loc = last_loc*rescale_xy       
@@ -218,17 +222,25 @@ class LitGNN(pl.LightningModule):
                 future=np.vstack([future, future])
 
             # Plot predictions
+            
+
             if category != 'vehicle':
                 if 'sitting_lying_down' not in attribute:
-                    for t in range(prediction.shape[1]):
-                        try:
-                            sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
-                                ax=ax, shade=True, thresh=0.05, 
-                                color='b', zorder=600, alpha=0.8)
-                        except:
-                            print('2-th leading minor of the array is not positive definite.',  sys.exc_info()[0], 'ocurred.' )
-                            continue
-                    
+                    if self.model_type == 'scout':
+                        ax.plot(prediction[0, :, 0], prediction[0, :, 1], 'bo-',
+                                zorder=620,
+                                markersize=2,
+                                linewidth=1, alpha=0.7)
+                    else:
+                        for t in range(prediction.shape[1]):
+                            try:
+                                sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
+                                    ax=ax, shade=True, thresh=0.05, 
+                                    color='b', zorder=600, alpha=0.8)
+                            except:
+                                print('2-th leading minor of the array is not positive definite.',  sys.exc_info()[0], 'ocurred.' )
+                                continue
+                        
                     '''
                     #Plot 25 predictions (modes)
                     for sample_num in range(prediction.shape[0]):
@@ -240,14 +252,20 @@ class LitGNN(pl.LightningModule):
 
             else:  
                 if 'parked' not in attribute:
-                    for t in range(prediction.shape[1]):
-                        try:
-                            sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
-                                ax=ax, shade=True, thresh=0.05, 
-                                color=line_colors[i % len(line_colors)], zorder=600, alpha=1)
-                        except:
-                            print('2-th leading minor of the array is not positive definite')
-                            continue
+                    if self.model_type == 'scout':
+                        ax.plot(prediction[0, :, 0], prediction[0, :, 1], 'mo-',
+                                zorder=620,
+                                markersize=3,
+                                linewidth=2, alpha=0.7)
+                    else:
+                        for t in range(prediction.shape[1]):
+                            try:
+                                sns.kdeplot(x=prediction[:,t,0], y=prediction[:,t,1],
+                                    ax=ax, shade=True, thresh=0.05, 
+                                    color=line_colors[i % len(line_colors)], zorder=600, alpha=1)
+                            except:
+                                print('2-th leading minor of the array is not positive definite')
+                                continue
                     
                     '''
                     #Plot 25 predictions (modes)
@@ -291,7 +309,7 @@ class LitGNN(pl.LightningModule):
             ax.add_artist(circle)
         
         #ax.axis('off')
-        fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
+        fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_' + self.model_type + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
         print('Image saved in: ', os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'))
    
 def main(args: Namespace):
@@ -303,16 +321,23 @@ def main(args: Namespace):
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout,  ew_dims=args.ew_dims)
-    else:
-        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims)
+    elif  args.model_type == 'vae_gat':
+        model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, 
+                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, 
+                        ew_dims=args.ew_dims, backbone=args.backbone)
+    elif args.model_type == 'scout':
+        hidden_dims = round(args.hidden_dims // args.heads)
+        model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
+                        feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone)
+    
 
-    LitGNN_sys = LitGNN(model=model, history_frames=history_frames, future_frames= future_frames, train_dataset=None, val_dataset=None,
+    LitGNN_sys = LitGNN(model=model,  model_type = args.model_type,history_frames=history_frames, future_frames= future_frames, train_dataset=None, val_dataset=None,
                  test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, scene_id=args.scene_id)
       
     trainer = pl.Trainer(gpus=1, deterministic=True,  profiler=True) 
  
-    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, history_frames=history_frames, future_frames= future_frames,
-                    train_dataset=None, val_dataset=None, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor)
+    LitGNN_sys = LitGNN.load_from_checkpoint(checkpoint_path=args.ckpt, model=LitGNN_sys.model, model_type = args.model_type, history_frames=history_frames, future_frames= future_frames,
+                    train_dataset=None, val_dataset=None, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, scene_id=args.scene_id)
 
     
     trainer.test(LitGNN_sys)
@@ -324,22 +349,22 @@ if __name__ == '__main__':
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--z_dims", type=int, default=32, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=512)
+    parser.add_argument("--z_dims", type=int, default=128, help="Dimensionality of the latent space")
+    parser.add_argument("--hidden_dims", type=int, default=768)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
-                                        choices=['vae_gat', 'vae_gated'])
+                                        choices=['vae_gat', 'vae_gated', 'scout'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
-    parser.add_argument("--attn_drop", type=float, default=0.25)
+    parser.add_argument("--attn_drop", type=float, default=0.4)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
-    parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=False, help="Add edge features in attention function (GAT)")
-    parser.add_argument('--ckpt', type=str, default=None, help='ckpt path.')   
+    parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=True, help="Add edge features in attention function (GAT)")
+    parser.add_argument('--ckpt', type=str, default='/media/14TBDISK/sandra/logs/comic-sweep-17/epoch=83-step=11255.ckpt', help='ckpt path.')   
     parser.add_argument('--nowandb', action='store_true')
 
     parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=True, help="Add HD Maps.")
-    parser.add_argument("--backbone", type=str, default='map_encoder', help="Choose CNN backbone.",
+    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
                                         choices=['mobilenet', 'resnet18', 'map_encoder'])
-    parser.add_argument("--scene_id", type=int, default=927, help="Scene id to visualize.")
+    parser.add_argument("--scene_id", type=int, default=103, help="Scene id to visualize.")
     
     hparams = parser.parse_args()
 
