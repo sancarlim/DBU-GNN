@@ -12,25 +12,10 @@ from dgl.nn.pytorch.conv.gatconv import edge_softmax, Identity, expand_as_pair
 import matplotlib.pyplot as plt
 import math
 from torch.utils.data import DataLoader
-
-def collate_batch(samples):
-    graphs, masks, feats, gt = map(list, zip(*samples))  # samples is a list of pairs (graph, mask) mask es VxTx1
-    masks = torch.vstack(masks)
-    feats = torch.vstack(feats)
-    gt = torch.vstack(gt).float()
-
-    #masks = masks.view(masks.shape[0],-1)
-    #masks= masks.view(masks.shape[0]*masks.shape[1],masks.shape[2],masks.shape[3])#.squeeze(0) para TAMAÑO FIJO
-    sizes_n = [graph.number_of_nodes() for graph in graphs] # graph sizes
-    snorm_n = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_n]
-    snorm_n = torch.cat(snorm_n).sqrt()  # graph size normalization 
-    sizes_e = [graph.number_of_edges() for graph in graphs] # nb of edges
-    snorm_e = [torch.FloatTensor(size, 1).fill_(1 / size) for size in sizes_e]
-    snorm_e = torch.cat(snorm_e).sqrt()  # graph size normalization
-    batched_graph = dgl.batch(graphs)  # batch graphs
-    return batched_graph, masks, snorm_n, snorm_e, feats, gt
-
-
+from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
+from torchvision.models import resnet18, mobilenet_v2
+from torchsummary import summary
+from models.MapEncoder import My_MapEncoder
 
 class GATConv(nn.Module):
     def __init__(self,
@@ -147,23 +132,18 @@ class My_GATLayer(nn.Module):
             self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
         else:
             self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
-        self.feat_drop_l = nn.Dropout(feat_drop, inplace=False)
-        self.attn_drop_l = nn.Dropout(attn_drop, inplace=False)   
+        self.feat_drop_l = nn.Dropout(feat_drop)
+        self.attn_drop_l = nn.Dropout(attn_drop)   
         self.res_con = res_connection
         self.reset_parameters()
       
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        gain = nn.init.calculate_gain('relu')
         
         nn.init.kaiming_normal_(self.linear_self.weight, nonlinearity='relu')
         nn.init.kaiming_normal_(self.linear_func.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.attention_func.weight, nonlinearity='leaky_relu')
-        '''
-        nn.init.xavier_normal_(self.linear_self.weight, gain=gain)
-        nn.init.xavier_normal_(self.linear_func.weight, gain=gain)
-        nn.init.xavier_normal_(self.attention_func.weight, gain=nn.init.calculate_gain('leaky_relu',0.01))
-        '''
+        nn.init.kaiming_normal_(self.attention_func.weight, a=0.01, nonlinearity='leaky_relu')
+        
     
     def edge_attention(self, edges):
         concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=-1) #(n_edg,hid)||(n_edg,hid) -> (n_edg,2*hid) 
@@ -222,46 +202,138 @@ class MultiHeadGATLayer(nn.Module):
             return torch.mean(torch.stack(head_outs))
 
     
-class My_GAT(nn.Module):
+class SCOUT(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=True, feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, res_connection=True):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=False, gn=False, 
+                feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, 
+                res_connection=True, ew_type=False,  backbone='mobilenet', freeze=False):
         super().__init__()
-        self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.embedding_e = nn.Linear(1, hidden_dim)
+
         self.heads = heads
+        self.bn = bn
+        self.gn = gn
+        self.embedding_h = nn.Linear(input_dim, hidden_dim)###//2)
+
+        ###############
+        # Map Encoder #
+        ###############
+        
+        if backbone == 'map_encoder':            
+            self.feature_extractor = My_MapEncoder(input_channels = 1, input_size=112, 
+                                                    hidden_channels = [10,32,64,128,256], output_size = 256, 
+                                                    kernels = [5,5,3,3,3], strides = [1,2,2,2,2])
+            hidden_dims = hidden_dim+256
+            '''
+            model_ft = resnet18(pretrained=False)
+            model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=1, padding=3,
+                               bias=False)
+            nn.init.kaiming_normal_(model_ft.conv1.weight, mode='fan_out', nonlinearity='relu')
+            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1]) 
+            hidden_dims = hidden_dim+512
+            '''
+        elif backbone == 'mobilenet':       
+            if not freeze:
+                self.feature_extractor = mobilenet_v2(pretrained=True, num_classes=512)
+            else:
+                self.feature_extractor = mobilenet_v2(pretrained=True)
+                self.feature_extractor.classifier[1] = nn.Linear(in_features=self.feature_extractor.classifier[1].in_features, out_features=512)
+                if freeze:
+                    ct=0 
+                    for child in self.feature_extractor.features:
+                        ct+=1
+                        if ct < 16:
+                            for param in child.parameters():
+                                param.requires_grad = False
+        elif backbone == 'resnet':       
+            model_ft = resnet18(pretrained=True)
+            modules = list(model_ft.children())[:-3]
+            modules.append(torch.nn.AdaptiveAvgPool2d((1, 1))) 
+            self.feature_extractor = torch.nn.Sequential(*modules) 
+            if freeze:
+                ct=0
+                for child in self.feature_extractor.children():
+                    ct+=1
+                    if ct < 6:  #freeze 2 BasicBlocks , train last one 128 -> 256
+                        for param in child.parameters():
+                            param.requires_grad = False
+            hidden_dims = hidden_dim+256
+        
+        elif backbone == 'resnet_gray':
+            resnet = resnet18(pretrained=False)
+            modules = list(resnet.children())[:-3]
+            modules.append(torch.nn.AdaptiveAvgPool2d((1, 1))) 
+            modules[0] = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3,bias=False)
+            nn.init.kaiming_normal_(modules[0].weight, mode='fan_out', nonlinearity='relu')
+            self.feature_extractor=torch.nn.Sequential(*modules)   
+            hidden_dims = hidden_dim + 256
+
+        #self.linear_cat = nn.Linear(emb_dim, hidden_dim)
+        #hidden_dims = hidden_dim
+        self.embedding_e = nn.Linear(2, hidden_dims) if  ew_type else nn.Linear(1, hidden_dims)
+        if bn:
+            self.batch_norm = nn.BatchNorm1d(hidden_dims)
+        elif gn:
+            self.group_norm = nn.GroupNorm(32, hidden_dims) 
+
         if heads == 1:
-            self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
-            self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
-            self.linear1 = nn.Linear(hidden_dim, output_dim)          
+            self.gat_1 = My_GATLayer(hidden_dims, hidden_dims, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
+            self.gat_2 = My_GATLayer(hidden_dims, hidden_dims, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
+            self.linear1 = nn.Linear(hidden_dims, output_dim)          
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim, res_weight=res_weight, merge='average', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
-            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads, hidden_dim*heads, merge='cat', res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.linear1 = nn.Linear(hidden_dim*heads, output_dim)
+            self.gat_1 = MultiHeadGATLayer(hidden_dims, hidden_dims, res_weight=res_weight, merge='cat', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.embedding_e2 = nn.Linear(2, hidden_dims*heads) if ew_type else nn.Linear(1, hidden_dims*heads)
+            self.gat_2 = MultiHeadGATLayer(hidden_dims*heads, hidden_dims*heads, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.linear1 = nn.Linear(hidden_dims*heads, output_dim)
 
         if dropout:
             self.dropout_l = nn.Dropout(dropout, inplace=False)
         else:
             self.dropout_l = nn.Dropout(0.)
+        
+        
+
         self.reset_parameters()
 
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        gain = nn.init.calculate_gain('relu')
+        if self.bn:
+            nn.init.constant_(self.batch_norm.weight, 1)
+            nn.init.constant_(self.batch_norm.bias, 0)
+        elif self.gn:
+            nn.init.constant_(self.group_norm.weight, 1)
+            nn.init.constant_(self.group_norm.bias, 0)
         nn.init.xavier_normal_(self.embedding_h.weight)
-        nn.init.xavier_normal_(self.linear1.weight)  #Aquí ya no hay no linearlidad
+        nn.init.kaiming_normal_(self.linear1.weight, nonlinearity='relu')
         nn.init.xavier_normal_(self.embedding_e.weight)       
-        if self.heads == 3:
+        if self.heads > 1:
             nn.init.xavier_normal_(self.embedding_e2.weight)
     
-    def forward(self, g, feats,e_w,snorm_n,snorm_e):
+    def inference(self, g, feats, e_w,snorm_n,snorm_e, maps):
+        y=self.forward(g, feats, e_w, snorm_n, snorm_e, maps)
+        return y
+
+    def forward(self, g, feats,e_w,snorm_n,snorm_e, maps):
         #reshape to have shape (B*V,T*C) [c1,c2,...,c6]
         feats = feats.contiguous().view(feats.shape[0],-1)
-        # input embedding
-        h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
-        e = self.embedding_e(e_w)
+
+        # Input embedding
+        h_emb = self.embedding_h(feats)  #[N,hidds]
+        e = self.embedding_e(e_w)       
+
+        # Maps feature extraction
+        maps_embedding = self.feature_extractor(maps)  #[N,1,1,512]
+
+        # Embeddings concatenation
+        h = torch.cat([maps_embedding.squeeze(dim=-1).squeeze(dim=-1), h_emb], dim=-1)
+        #h = self.linear_cat(h)
+        #h = F.relu(h)
+        if self.bn:
+            h = self.batch_norm(h)
+        elif self.gn:
+            h = self.group_norm(h)
+
+        # GAT Layers
         g.edata['w']=e
-        # gat layers
         h = self.gat_1(g, h,snorm_n) 
         if self.heads > 1:
             e = self.embedding_e2(e_w)
@@ -273,21 +345,24 @@ class My_GAT(nn.Module):
     
 if __name__ == '__main__':
 
-    history_frames = 3
-    future_frames = 3
-    hidden_dims = 256
-    heads = 1
+    history_frames = 4
+    future_frames = 12
+    hidden_dims = 1024
+    heads = 2
 
-    test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type='gat')  #1754
-    test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=12, collate_fn=collate_batch) 
-     
-    input_dim = 5*history_frames
+    input_dim = 9*history_frames
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, dropout=0.1, bn=True, feat_drop=0., attn_drop=0., att_ew=True, res_connection=False, res_weight=False)
-    
-    iter_dataloader = iter(test_dataloader)
-    graph, masks, snorm_n, snorm_e, feats, labels = next(iter_dataloader)
-    edge_mask=graph.edata['w'].view(graph.edata['w'].shape[0],1)
-    out = model(graph,feats,  edge_mask,snorm_n,snorm_e)
+    model = SCOUT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, 
+                   dropout=0.1, bn=False, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='map_encoder', freeze=True)
+    summary(model.feature_extractor, input_size=(1,112,112), device='cpu')
+    print(model.feature_extractor)
+    test_dataset = nuscenes_Dataset(train_val_test='train', rel_types=True, history_frames=history_frames, future_frames=future_frames) 
+    test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
+
+    for batch in test_dataloader:
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = batch
+        e_w = batched_graph.edata['w']
+        out = model.inference(batched_graph, feats,e_w,snorm_n,snorm_e, maps)
+        print(out.shape)

@@ -3,6 +3,7 @@ import os
 import numpy as np
 from scipy import spatial 
 import pickle
+import torch 
 from nuscenes.nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 from nuscenes.eval.prediction.splits import get_prediction_challenge_split
@@ -12,6 +13,7 @@ from nuscenes.utils.splits import create_splits_scenes
 import pandas as pd
 from collections import defaultdict
 from pyquaternion import Quaternion
+from torchvision import transforms
 
 from nuscenes.prediction.input_representation.static_layers import StaticLayerRasterizer
 from nuscenes.prediction.input_representation.agents import AgentBoxesWithFadedHistory
@@ -22,8 +24,8 @@ from nuscenes.prediction.input_representation.combinators import Rasterizer
 #508 0 sequences???
 scene_blacklist = [499, 515, 517]
 
-max_num_objects = 150 #To return np array 
-total_feature_dimension = 14 #x,y,heading,vel,acc,head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects
+max_num_objects = 110  #pkl np.arrays with same dimensions
+total_feature_dimension = 16 #x,y,heading,vel[x,y],acc[x,y],head_rate, type, l,w,h, frame_id, scene_id, mask, num_visible_objects
 
 FREQUENCY = 2
 dt = 1 / FREQUENCY
@@ -38,6 +40,20 @@ DATAROOT = '/media/14TBDISK/nuscenes'
 nuscenes = NuScenes('v1.0-trainval', dataroot=DATAROOT)   #850 scenes
 # Helper for querying past and future data for an agent.
 helper = PredictHelper(nuscenes)
+base_path = '/media/14TBDISK/sandra/nuscenes_processed'
+base_path_map = os.path.join(base_path, 'hd_maps_step2_4parked_2s')
+
+static_layer_rasterizer = StaticLayerRasterizer(helper)
+agent_rasterizer = AgentBoxesWithFadedHistory(helper, seconds_of_history=2)
+input_representation = InputRepresentation(static_layer_rasterizer, agent_rasterizer, Rasterizer())
+transform = transforms.Compose(
+                            [
+                                #transforms.ToTensor(),
+                                transforms.Resize((112,112), interpolation=3),
+                                #transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+                            ]
+                        )
+
 
 #DEFINE ATTENTION RADIUS FOR CONNECTING NODES
 VEH_VEH_RADIUS= 35
@@ -48,16 +64,6 @@ PED_BIC_RADIUS= 15
 BIC_BIC_RADIUS= 25
 neighbor_distance = VEH_VEH_RADIUS
 
-'''
-data_columns_vehicle = pd.MultiIndex.from_product([['position', 'velocity', 'acceleration', 'heading'], ['x', 'y']])
-data_columns_vehicle = data_columns_vehicle.append(pd.MultiIndex.from_tuples([('heading', '°'), ('heading', 'd°')]))
-data_columns_vehicle = data_columns_vehicle.append(pd.MultiIndex.from_product([['velocity', 'acceleration'], ['norm']]))
-data_columns_pedestrian = pd.MultiIndex.from_product([['position', 'velocity', 'acceleration'], ['x', 'y']])
-
-
-# To get data for an agent at a particular timestamp
-instance_token, sample_token = train[0].split("_")
-'''
 
 def pol2cart(th, r):
     """
@@ -72,7 +78,6 @@ def pol2cart(th, r):
 
     cart = np.array([x, y]).transpose()
     return cart
-
 
 def cart2pol(cart):
     """
@@ -223,8 +228,10 @@ def process_scene(scene):
                                  'x_global',
                                  'y_global', 
                                  'heading',
-                                 'velocity',
-                                 'acceleration',
+                                 'vel_x',
+                                 'vel_y',
+                                 'acc_x',
+                                 'acc_y',
                                  'heading_change_rate',
                                  'length',
                                  'width',
@@ -233,6 +240,8 @@ def process_scene(scene):
     sample = nuscenes.get('sample', sample_token)
     frame_id = 0
     mean_xy = []
+    parked = 0
+    standing = 0
     while sample['next']:
         annotations = helper.get_annotations_for_sample(sample_token)
         for i,annotation in enumerate(annotations):
@@ -244,12 +253,21 @@ def process_scene(scene):
             else:
                 continue
 
-            if 'pedestrian' in category and not 'stroller' in category and not 'wheelchair' in category:
+            if 'pedestrian' in category and not 'stroller' in category and not 'wheelchair' in category:# and 'sitting_lying_down' not in attribute:
+                #if 'standing' in attribute:
+                #    standing +=1
+                #    if standing > 2:
+                #        continue
                 node_type = 2
-            elif 'bicycle' in category or 'motorcycle' in category:
+            elif 'bicycle' in category or 'motorcycle' in category: #and 'without_rider' not in attribute:
                 node_type = 3
-            elif 'vehicle' in category: # and 'parked' not in attribute: #filter parked vehicles                
+            elif 'vehicle' in category: #filter parked vehicles                
                 node_type = 1
+                if 'parked' in attribute:
+                    parked += 1
+                    # Keep only 5 parked maximum per sequence
+                    if parked > 4:
+                        continue
             else:
                 continue
 
@@ -267,8 +285,10 @@ def process_scene(scene):
                                     'x_global': annotation['translation'][0],
                                     'y_global': annotation['translation'][1],
                                     'heading': Quaternion(annotation['rotation']).yaw_pitch_roll[0],
-                                    'velocity': velocity,
-                                    'acceleration': acceleration,
+                                    'vel_x': velocity[0],
+                                    'vel_y': velocity[1],
+                                    'acc_x': acceleration[0],
+                                    'acc_y': acceleration[1],
                                     'heading_change_rate': heading_change_rate,
                                     'length': annotation['size'][0],
                                     'width': annotation['size'][1],
@@ -279,6 +299,8 @@ def process_scene(scene):
         sample = nuscenes.get('sample', sample['next'])
         sample_token = sample['token']
         frame_id += 1
+        parked = 0
+        standing = 0
         '''
         #Zero-centralization per frame (sequence)
         mean_xy.append([data['x_global'].mean(),data['y_global'].mean()])
@@ -304,7 +326,7 @@ def process_scene(scene):
         track['info_sequence'] = np.stack([track["frame_id"],track["scene_id"]], axis=-1)
         track['info_agent'] = np.stack([track["type"],track["length"],track["width"],track["height"]], axis=-1)
         track["position"] = np.stack([track["x_global"], track["y_global"], track["heading"]], axis=-1)
-        track['motion'] = np.stack([track["velocity"], track["acceleration"], track["heading_change_rate"]], axis=-1)
+        track['motion'] = np.stack([track["vel_x"], track["vel_y"], track["acc_x"],track["acc_y"], track["heading_change_rate"]], axis=-1)
         track["bbox"] = calculate_rotated_bboxes(track["x_global"], track["y_global"],
                                                 track["length"], track["width"],
                                                 np.deg2rad(track["heading"]))
@@ -318,46 +340,43 @@ def process_scene(scene):
     all_adjacency_list = []
     all_mean_list = []
     tokens_list = []
+    maps_list = []
     visible_object_indexes_list=[]
-    step=2 #iterate over 1s
+    step=2 #iterate over 2s
     for start_ind in frame_id_list[:-total_frames+1:step]:
-        current_frame = start_ind + history_frames -1
+        current_frame = start_ind + history_frames -1   #0,8,16,24
         end_ind = start_ind + total_frames
         object_frame_feature, neighbor_matrix, mean_xy, inst_sample_tokens = process_tracks(tracks, start_ind, end_ind, current_frame)  
-        #print(f"Processed sequence with current frame {current_frame}")
+        
+        #HD MAPs
+        sample_token = tracks[current_frame]['sample_token'][0]
+        
+        #maps = [transform(input_representation.make_input_representation(instance, sample_token)) for instance in tracks[current_frame]["node_id"]]   #Tensor [N_agents,3,112,112] float32 [0,1]       
+        
+        maps = np.array( [input_representation.make_input_representation(instance, sample_token) for instance in tracks[current_frame]["node_id"]] )   #[N_agents,500,500,3] uint8 range [0,256] 
+        maps = np.array( transform(torch.tensor(maps.transpose(0,3,1,2))) ).transpose(0,2,3,1)
+
+        save_path_map = os.path.join(base_path_map, sample_token + '.pkl')
+        with open(save_path_map, 'wb') as writer:
+            pickle.dump(maps,writer)  
+            
+'''
         all_feature_list.append(object_frame_feature)
         all_adjacency_list.append(neighbor_matrix)	
         all_mean_list.append(mean_xy)
         tokens_list.append(inst_sample_tokens)
+
 
     all_adjacency = np.array(all_adjacency_list)
     all_mean = np.array(all_mean_list)                            
     all_feature = np.array(all_feature_list)
     tokens = np.array(tokens_list, dtype=object)
     return all_feature, all_adjacency, all_mean, tokens
-
-    '''
-    # Generate Maps
-    map_name = nuscenes.get('log', scene['log_token'])['location']
-    nusc_map = NuScenesMap(dataroot=DATAROOT, map_name=map_name)
-
-    type_map = dict()
-    x_size = x_max - x_min
-    y_size = y_max - y_min
-    patch_box = (x_min + 0.5 * (x_max - x_min), y_min + 0.5 * (y_max - y_min), y_size, x_size)
-    patch_angle = 0  # Default orientation where North is up
-    canvas_size = (np.round(3 * y_size).astype(int), np.round(3 * x_size).astype(int))
-    homography = np.array([[3., 0., 0.], [0., 3., 0.], [0., 0., 3.]])
-    layer_names = ['lane', 'road_segment', 'drivable_area', 'road_divider', 'lane_divider', 'stop_line',
-                   'ped_crossing', 'stop_line', 'ped_crossing', 'walkway']
-    map_mask = (nusc_map.get_map_mask(patch_box, patch_angle, layer_names, canvas_size) * 255.0).astype(
-        np.uint8)
-    map_mask = np.swapaxes(map_mask, 1, 2)  # x axis comes first
-    '''
+'''    
 
 
 # Data splits for the CHALLENGE - returns instance and sample token  
-
+'''
 # Train: 5883 seq (475 scenes) Train_val: 2219 seq (185 scenes)  Val: 1682 seq (138 scenes) 
 ns_scene_names = dict()
 ns_scene_names['train'] = get_prediction_challenge_split("train", dataroot=DATAROOT) 
@@ -367,7 +386,7 @@ ns_scene_names['test'] = get_prediction_challenge_split("val", dataroot=DATAROOT
 
 
 #scenes_df=[]
-for data_class in ['train', 'val', 'test']:
+for data_class in ['train']:
     scenes=[]
     for ann in ns_scene_names[data_class]:
         _, sample_token=ann.split("_")
@@ -375,13 +394,15 @@ for data_class in ['train', 'val', 'test']:
         scenes.append(nuscenes.get('scene', sample['scene_token'])['token'])
     scenes_token_set = list(set(scenes))
 
-    all_data=[]
-    all_adjacency=[]
-    all_mean_xy=[]
-    all_tokens=[]
+    all_data = []
+    all_adjacency = []
+    all_mean_xy = []
+    all_tokens = []
+    
     for scene_token in scenes_token_set:
         all_feature_sc, all_adjacency_sc, all_mean_sc, tokens_sc = process_scene(nuscenes.get('scene', scene_token))
         print(f"Scene {nuscenes.get('scene', scene_token)['name']} processed! {all_adjacency_sc.shape[0]} sequences of 8 seconds.")
+    
         all_data.extend(all_feature_sc)
         all_adjacency.extend(all_adjacency_sc)
         all_mean_xy.extend(all_mean_sc)
@@ -392,13 +413,12 @@ for data_class in ['train', 'val', 'test']:
     all_adjacency = np.array(all_adjacency) 
     all_mean_xy = np.array(all_mean_xy) 
     all_tokens = np.array(all_tokens)
-    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_' + data_class + '.pkl'
+    save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_' + data_class + '.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
     print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
+'''    
 
-
-'''
 #Usual split: Train 8536 (700 scenes)  Val: 1828 (150 scenes)
 splits = create_splits_scenes()
 ns_scene_names = dict()
@@ -406,7 +426,7 @@ ns_scene_names['train'] =  splits['train']
 ns_scene_names['val'] =  splits['val']
 ns_scene_names['test'] = splits['test']
 
-for data_class in ['train', 'val', 'test']:
+for data_class in ['val']:
     all_data=[]
     all_adjacency=[]
     all_mean_xy=[]
@@ -417,19 +437,31 @@ for data_class in ['train', 'val', 'test']:
         scene_id = int(ns_scene['name'].replace('scene-', ''))
         if scene_id in scene_blacklist:  # Some scenes have bad localization
             continue
+        process_scene(ns_scene)
+        print(f"Scene {ns_scene_name} processed! ")
+'''
         all_feature_sc, all_adjacency_sc, all_mean_sc, tokens_sc = process_scene(ns_scene)
         print(f"Scene {ns_scene_name} processed! {all_adjacency_sc.shape[0]} sequences of 8 seconds.")
         all_data.extend(all_feature_sc)
         all_adjacency.extend(all_adjacency_sc)
         all_mean_xy.extend(all_mean_sc)
         all_tokens.extend(tokens_sc)
+
+all_data = np.array(all_data)  
+all_adjacency = np.array(all_adjacency) 
+all_mean_xy = np.array(all_mean_xy) 
+all_tokens = np.array(all_tokens)
+save_path = '/media/14TBDISK/sandra/nuscenes_processed/nuscenes_challenge_global_step2_seq_trainandval_filter.pkl' #+ data_class + '.pkl'
+with open(save_path, 'wb') as writer:
+    pickle.dump([all_data, all_adjacency, all_mean_xy, all_tokens], writer)
+print(f'Processed {all_data.shape[0]} sequences and {len(scenes_token_set)} scenes.')
+  
 '''
-    
 
 #To return the past/future data for the entire sample (local/global - in_agent_frame=T/F)
-sample_ann = helper.get_annotations_for_sample(sample_token)
-future_xy_global = helper.get_future_for_sample(sample_token, seconds=3, in_agent_frame=False)
-past_xy_global = helper.get_past_for_sample(sample_token, seconds=3, in_agent_frame=False)
+#sample_ann = helper.get_annotations_for_sample(sample_token)
+#future_xy_global = helper.get_future_for_sample(sample_token, seconds=3, in_agent_frame=False)
+#past_xy_global = helper.get_past_for_sample(sample_token, seconds=3, in_agent_frame=False)
 
 # The goal of the nuScenes prediction task is to predict the future trajectories of objects in the nuScenes dataset. 
 # A trajectory is a sequence of x-y locations. For this challenge, the predictions are 6-seconds long and sampled at 2 hertz (n_timesteps is 12) and 2s of history.
