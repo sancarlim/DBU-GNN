@@ -8,7 +8,7 @@ os.environ['DGLBACKEND'] = 'pytorch'
 import sys
 sys.path.append('../../DBU_Graph')
 import numpy as np
-from nuscenes_Dataset import nuscenes_Dataset, collate_batch
+from nuscenes_Dataset_gray import nuscenes_Dataset, collate_batch
 from models.VAE_GNN import VAE_GNN
 from models.VAE_GATED import VAE_GATED
 import random
@@ -39,11 +39,12 @@ output_dim = future_frames*2
 
 class LitGNN(pl.LightningModule):
     def __init__(self, model,  train_dataset, val_dataset, test_dataset, history_frames: int=3, future_frames: int=3, 
-                    lr: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., 
+                    lr1: float = 1e-3, lr2: float = 1e-3, batch_size: int = 64, wd: float = 1e-1, beta: float = 0., delta: float = 1., 
                     rel_types: bool = False, scale_factor: int = 1, wandb : bool = True):
         super().__init__()
         self.model= model
-        self.lr = lr
+        self.lr1 = lr1
+        self.lr2 = lr2
         self.batch_size = batch_size
         self.wd = wd
         self.history_frames =history_frames
@@ -69,7 +70,11 @@ class LitGNN(pl.LightningModule):
     
     def configure_optimizers(self):
         #opt = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
+        opt = torch.optim.AdamW([
+                {'params': self.model.base.parameters()},
+                {'params': self.model.embedding_h.parameters(), 'lr': self.lr1},
+                {'params': self.model.feature_extractor.parameters(), 'lr': self.lr1}], lr=self.lr2, weight_decay=self.wd)
+        
         return opt
     
     def train_dataloader(self):
@@ -144,9 +149,10 @@ class LitGNN(pl.LightningModule):
         pred, mu, log_var = self.model(batched_graph, feats,e_w,snorm_n,snorm_e,labels, maps)
         pred=pred.view(labels.shape[0],self.future_frames,-1)
         
-        total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss='mse')
-
-        self.log_dict({"Sweep/val_loss": logs['loss'], "Sweep/val_mse_loss": logs['Reconstruction_Loss'], "Sweep/Val_KL": logs['KL']})
+        reconstruction_loss = 'huber'
+        total_loss, logs = self.vae_loss(pred, labels, output_masks, mu, log_var, beta=self.beta, reconstruction_loss=reconstruction_loss)
+        recons_loss_log = "Sweep/val_" + reconstruction_loss
+        self.log_dict({"Sweep/val_loss": logs['loss'], recons_loss_log: logs['Reconstruction_Loss'], "Sweep/Val_KL": logs['KL']})
         return total_loss
 
     def validation_epoch_end(self, val_loss_over_batches):
@@ -160,7 +166,10 @@ class LitGNN(pl.LightningModule):
         batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = test_batch
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
-        last_loc = last_loc*rescale_xy       
+        if self.scale_factor == 1:
+            last_loc = last_loc*12.4354+0.1579
+        else:
+            last_loc = last_loc*rescale_xy      
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -193,7 +202,6 @@ class LitGNN(pl.LightningModule):
                             break
             ade.append(ade_s) #S samples
             fde.append(fde_s)
-    
         self.log_dict({'test/ade': min(ade), "test/fde": fde[ade.index(min(ade))]})
         
    
@@ -205,17 +213,17 @@ def main(args: Namespace):
 
     train_dataset = nuscenes_Dataset(train_val_test='train',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames) #3447
     val_dataset = nuscenes_Dataset(train_val_test='val',  rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #919
-    test_dataset = nuscenes_Dataset(train_val_test='test', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
+    test_dataset = nuscenes_Dataset(train_val_test='val', rel_types=args.ew_dims>1, history_frames=history_frames, future_frames=future_frames)  #230
 
     if args.model_type == 'vae_gated':
         model = VAE_GATED(input_dim_model, args.hidden_dims, z_dim=args.z_dims, output_dim=output_dim, fc=False, dropout=args.dropout, 
-                             ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained)
+                             ew_dims=args.ew_dims, backbone=args.backbone, freeze=args.freeze)
     else:
         model = VAE_GNN(input_dim_model, args.hidden_dims//args.heads, args.z_dims, output_dim, fc=False, dropout=args.dropout, feat_drop=args.feat_drop,
-                        attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone, pretrained=args.pretrained,
+                        attn_drop=args.attn_drop, heads=args.heads, att_ew=args.att_ew, ew_dims=args.ew_dims, backbone=args.backbone, freeze=args.freeze,
                         bn=(args.norm=='bn'), gn=(args.norm=='gn'))
 
-    LitGNN_sys = LitGNN(model=model, lr=args.lr,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
+    LitGNN_sys = LitGNN(model=model, lr1=args.lr1, lr2=args.lr2,  wd=args.wd, history_frames=history_frames, future_frames= future_frames, beta = args.beta, delta=args.delta,
     train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset, rel_types=args.ew_dims>1, scale_factor=args.scale_factor, wandb= not args.nowandb)
     
     
@@ -244,7 +252,6 @@ def main(args: Namespace):
         trainer = pl.Trainer(gpus=1, profiler=True)
         trainer.test(LitGNN_sys)
     else:
-        print('Best lr: ', LitGNN_sys.lr)
         print('GPU Nº: ', device)
         print("############### TRAIN ####################")
         trainer.fit(LitGNN_sys)
@@ -260,17 +267,18 @@ if __name__ == '__main__':
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
     parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Adam: learning rate")
-    parser.add_argument("--wd", type=float, default=0.1, help="Adam: weight decay")
-    parser.add_argument("--batch_size", type=int, default=128, help="Size of the batches")
-    parser.add_argument("--z_dims", type=int, default=32, help="Dimensionality of the latent space")
-    parser.add_argument("--hidden_dims", type=int, default=1024)
+    parser.add_argument("--lr1", type=float, default=1e-4, help="Adam: Embedding learning rate")
+    parser.add_argument("--lr2", type=float, default=1e-3, help="Adam: Base learning rate")
+    parser.add_argument("--wd", type=float, default=0.05, help="Adam: weight decay")
+    parser.add_argument("--batch_size", type=int, default=512, help="Size of the batches")
+    parser.add_argument("--z_dims", type=int, default=128, help="Dimensionality of the latent space")
+    parser.add_argument("--hidden_dims", type=int, default=768)
     parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated'])
-    parser.add_argument("--backbone", type=str, default='resnet', help="Choose CNN backbone.",
+    parser.add_argument("--backbone", type=str, default='resnet_gray', help="Choose CNN backbone.",
                                         choices=['resnet_gray', 'resnet', 'map_encoder'])
     parser.add_argument("--norm", type=str, default=None, help="Wether to apply BN (bn) or GroupNorm (gn).")
-    parser.add_argument('--pretrained', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
+    parser.add_argument('--freeze', type=int, default=6, help="Layers to freeze in resnet18.")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.25)
