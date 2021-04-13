@@ -122,14 +122,14 @@ class GATConv(nn.Module):
 
 
 class My_GATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats,  relu=True, feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
+    def __init__(self, in_feats, out_feats, e_dims, relu=True, feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
         super(My_GATLayer, self).__init__()
         self.linear_self = nn.Linear(in_feats, out_feats, bias=False)
         self.linear_func = nn.Linear(in_feats, out_feats, bias=False)
         self.att_ew=att_ew
         self.relu = relu
         if att_ew:
-            self.attention_func = nn.Linear(3 * out_feats, 1, bias=False)
+            self.attention_func = nn.Linear(2 * out_feats + e_dims, 1, bias=False)
         else:
             self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
         self.feat_drop_l = nn.Dropout(feat_drop)
@@ -139,10 +139,9 @@ class My_GATLayer(nn.Module):
       
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
-        
         nn.init.kaiming_normal_(self.linear_self.weight, nonlinearity='relu')
         nn.init.kaiming_normal_(self.linear_func.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.attention_func.weight, a=0.01, nonlinearity='leaky_relu')
+        nn.init.kaiming_normal_(self.attention_func.weight, a=0.02, nonlinearity='leaky_relu')
         
     
     def edge_attention(self, edges):
@@ -185,11 +184,11 @@ class My_GATLayer(nn.Module):
 
 
 class MultiHeadGATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, num_heads, relu=True, merge='cat',  feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
+    def __init__(self, in_feats, out_feats, num_heads, e_dims, relu=True, merge='cat',  feat_drop=0., attn_drop=0., att_ew=False, res_weight=True, res_connection=True):
         super(MultiHeadGATLayer, self).__init__()
         self.heads = nn.ModuleList()
         for i in range(num_heads):
-            self.heads.append(My_GATLayer(in_feats, out_feats,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew, res_weight=res_weight, res_connection=res_connection))
+            self.heads.append(My_GATLayer(in_feats, out_feats, e_dims, feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew, res_weight=res_weight, res_connection=res_connection))
         self.merge = merge
 
     def forward(self, g, h, snorm_n):
@@ -206,7 +205,7 @@ class SCOUT(nn.Module):
     
     def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2, bn=False, gn=False, 
                 feat_drop=0., attn_drop=0., heads=1,att_ew=False, res_weight=True, 
-                res_connection=True, ew_type=False,  backbone='mobilenet', freeze=False):
+                res_connection=True, ew_type=False,  backbone='mobilenet', freeze=0):
         super().__init__()
 
         self.heads = heads
@@ -214,15 +213,20 @@ class SCOUT(nn.Module):
         self.gn = gn
         self.embedding_h = nn.Linear(input_dim, hidden_dim)###//2)
 
+        #self.embedding_h = nn.Sequential(
+        #                                nn.Linear(input_dim, hidden_dim//2),
+        #                                nn.LeakyReLU(0.2),
+        #                                nn.Linear(hidden_dim//2,hidden_dim)        )
+
         ###############
         # Map Encoder #
         ###############
         
         if backbone == 'map_encoder':            
             self.feature_extractor = My_MapEncoder(input_channels = 1, input_size=112, 
-                                                    hidden_channels = [10,32,64,128,256], output_size = 256, 
+                                                    hidden_channels = [10,32,64,128,256], output_size = hidden_dim, 
                                                     kernels = [5,5,3,3,3], strides = [1,2,2,2,2])
-            hidden_dims = hidden_dim+256
+            hidden_dims = hidden_dim*2
             '''
             model_ft = resnet18(pretrained=False)
             model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=1, padding=3,
@@ -249,13 +253,12 @@ class SCOUT(nn.Module):
             modules = list(model_ft.children())[:-3]
             modules.append(torch.nn.AdaptiveAvgPool2d((1, 1))) 
             self.feature_extractor = torch.nn.Sequential(*modules) 
-            if freeze:
-                ct=0
-                for child in self.feature_extractor.children():
-                    ct+=1
-                    if ct < 6:  #freeze 2 BasicBlocks , train last one 128 -> 256
-                        for param in child.parameters():
-                            param.requires_grad = False
+            ct=0
+            for child in self.feature_extractor.children():
+                ct+=1
+                if ct < freeze:  #freeze 2 BasicBlocks , train last one 128 -> 256
+                    for param in child.parameters():
+                        param.requires_grad = False
             hidden_dims = hidden_dim+256
         
         elif backbone == 'resnet_gray':
@@ -269,20 +272,24 @@ class SCOUT(nn.Module):
 
         #self.linear_cat = nn.Linear(emb_dim, hidden_dim)
         #hidden_dims = hidden_dim
-        self.embedding_e = nn.Linear(2, hidden_dims) if  ew_type else nn.Linear(1, hidden_dims)
+        
+        #self.embedding_e = nn.Linear(2, hidden_dims) if  ew_type else nn.Linear(1, hidden_dims)
+        self.resize_e = nn.ReplicationPad1d(hidden_dim//2-1)
+
         if bn:
             self.batch_norm = nn.BatchNorm1d(hidden_dims)
         elif gn:
             self.group_norm = nn.GroupNorm(32, hidden_dims) 
 
         if heads == 1:
-            self.gat_1 = My_GATLayer(hidden_dims, hidden_dims, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
-            self.gat_2 = My_GATLayer(hidden_dims, hidden_dims, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
+            self.gat_1 = My_GATLayer(hidden_dims, hidden_dims, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection, e_dims=hidden_dim//2*2 ) #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu) 
+            self.gat_2 = My_GATLayer(hidden_dims, hidden_dims, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection, e_dims=hidden_dim//2*2 )  #GATConv(hidden_dim, hidden_dim, 1,feat_drop, attn_drop,residual=True, activation=torch.relu)
             self.linear1 = nn.Linear(hidden_dims, output_dim)          
         else:
-            self.gat_1 = MultiHeadGATLayer(hidden_dims, hidden_dims, res_weight=res_weight, merge='cat', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.embedding_e2 = nn.Linear(2, hidden_dims*heads) if ew_type else nn.Linear(1, hidden_dims*heads)
-            self.gat_2 = MultiHeadGATLayer(hidden_dims*heads, hidden_dims*heads, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            self.gat_1 = MultiHeadGATLayer(hidden_dims, hidden_dims, e_dims=hidden_dim//2*2,res_weight=res_weight, merge='cat', res_connection=res_connection , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew) #GATConv(hidden_dim, hidden_dim, heads,feat_drop, attn_drop,residual=True, activation='relu')
+            #self.embedding_e2 = nn.Linear(2, hidden_dims*heads) if ew_type else nn.Linear(1, hidden_dims*heads)
+            self.resize_e2 = nn.ReplicationPad1d(hidden_dim*heads//2-1)
+            self.gat_2 = MultiHeadGATLayer(hidden_dims*heads, hidden_dims*heads,e_dims=hidden_dim*heads//2*2, res_weight=res_weight, res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
             self.linear1 = nn.Linear(hidden_dims*heads, output_dim)
 
         if dropout:
@@ -291,7 +298,12 @@ class SCOUT(nn.Module):
             self.dropout_l = nn.Dropout(0.)
         
         
-
+        self.base = nn.Sequential(
+            self.gat_1,
+            self.gat_2,
+            #self.embedding_e2,
+            self.linear1
+        )
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -302,11 +314,12 @@ class SCOUT(nn.Module):
         elif self.gn:
             nn.init.constant_(self.group_norm.weight, 1)
             nn.init.constant_(self.group_norm.bias, 0)
+        #nn.init.kaiming_normal_(self.embedding_h[0].weight, nonlinearity='leaky_relu', a=0.2)
         nn.init.xavier_normal_(self.embedding_h.weight)
         nn.init.kaiming_normal_(self.linear1.weight, nonlinearity='relu')
-        nn.init.xavier_normal_(self.embedding_e.weight)       
-        if self.heads > 1:
-            nn.init.xavier_normal_(self.embedding_e2.weight)
+        #nn.init.xavier_normal_(self.embedding_e.weight)       
+        #if self.heads > 1:
+        #    nn.init.xavier_normal_(self.embedding_e2.weight)
     
     def inference(self, g, feats, e_w,snorm_n,snorm_e, maps):
         y=self.forward(g, feats, e_w, snorm_n, snorm_e, maps)
@@ -317,8 +330,7 @@ class SCOUT(nn.Module):
         feats = feats.contiguous().view(feats.shape[0],-1)
 
         # Input embedding
-        h_emb = self.embedding_h(feats)  #[N,hidds]
-        e = self.embedding_e(e_w)       
+        h_emb = self.embedding_h(feats)  #[N,hidds]   
 
         # Maps feature extraction
         maps_embedding = self.feature_extractor(maps)  #[N,1,1,512]
@@ -333,10 +345,11 @@ class SCOUT(nn.Module):
             h = self.group_norm(h)
 
         # GAT Layers
+        e=self.resize_e(torch.unsqueeze(e_w,dim=1)).flatten(start_dim=1)
         g.edata['w']=e
         h = self.gat_1(g, h,snorm_n) 
         if self.heads > 1:
-            e = self.embedding_e2(e_w)
+            e = self.resize_e2(torch.unsqueeze(e_w,dim=1)).flatten(start_dim=1)   #self.embedding_e2(e_w)
             g.edata['w']=e
         h = self.gat_2(g, h, snorm_n)  #BN Y RELU DENTRO DE LA GAT_LAYER
         h = self.dropout_l(h)
@@ -355,8 +368,8 @@ if __name__ == '__main__':
 
     hidden_dims = round(hidden_dims / heads) 
     model = SCOUT(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, 
-                   dropout=0.1, bn=False, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='map_encoder', freeze=True)
-    summary(model.feature_extractor, input_size=(1,112,112), device='cpu')
+                   dropout=0.1, bn=False, feat_drop=0., attn_drop=0., att_ew=True, ew_type=True, backbone='resnet', freeze=True)
+    #summary(model.feature_extractor, input_size=(1,112,112), device='cpu')
     print(model.feature_extractor)
     test_dataset = nuscenes_Dataset(train_val_test='train', rel_types=True, history_frames=history_frames, future_frames=future_frames) 
     test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
