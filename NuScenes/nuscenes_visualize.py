@@ -9,7 +9,7 @@ os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 from nuscenes_Dataset import nuscenes_Dataset
 from models.VAE_GNN import VAE_GNN
-from models.My_GAT import My_GAT
+from models.scout import SCOUT
 #from VAE_GATED import VAE_GATED
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
@@ -132,7 +132,10 @@ class LitGNN(pl.LightningModule):
         print(tokens_eval)
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
-        last_loc = last_loc*rescale_xy       
+        if self.scale_factor == 1:
+            last_loc = last_loc*12.4354+0.1579
+        else:
+            last_loc = last_loc*rescale_xy      
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -212,6 +215,10 @@ class LitGNN(pl.LightningModule):
 
             prediction = prediction_all_agents[:,idx]
             history = feats[idx,:,:2].cpu().numpy()
+            if self.scale_factor == 1:
+                history = history*12.4354+0.1579
+            else:
+                history = history*rescale_xy   
             #remove zero rows (no data in those frames) and rescale to obtain global coords.
             history = (history[history.all(axis=1)]*rescale_xy.cpu().numpy() + mean_xy[0]).squeeze() 
             future = labels_pos[idx].cpu().numpy()
@@ -327,7 +334,7 @@ def main(args: Namespace):
                         ew_dims=args.ew_dims, backbone=args.backbone)
     elif args.model_type == 'scout':
         hidden_dims = round(args.hidden_dims // args.heads)
-        model = My_GAT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
+        model = SCOUT(input_dim=input_dim_model, hidden_dim=hidden_dims, output_dim=output_dim, heads=args.heads, dropout=args.dropout, 
                         feat_drop=args.feat_drop, attn_drop=args.attn_drop, att_ew=args.att_ew, ew_type=args.ew_dims>1, backbone=args.backbone)
     
 
@@ -347,11 +354,11 @@ if __name__ == '__main__':
 
     parser = ArgumentParser()
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
-    parser.add_argument("--scale_factor", type=int, default=10, help="Wether to scale x,y global positions (zero-centralized)")
+    parser.add_argument("--scale_factor", type=int, default=1, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--z_dims", type=int, default=128, help="Dimensionality of the latent space")
+    parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
     parser.add_argument("--hidden_dims", type=int, default=768)
-    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
+    parser.add_argument("--model_type", type=str, default='scout', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated', 'scout'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
@@ -362,8 +369,8 @@ if __name__ == '__main__':
     parser.add_argument('--nowandb', action='store_true')
 
     parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=True, help="Add HD Maps.")
-    parser.add_argument("--backbone", type=str, default='resnet18', help="Choose CNN backbone.",
-                                        choices=['mobilenet', 'resnet18', 'map_encoder'])
+    parser.add_argument("--backbone", type=str, default='resnet_gray', help="Choose CNN backbone.",
+                                        choices=['resnet_gray', 'mobilenet', 'resnet18', 'map_encoder'])
     parser.add_argument("--scene_id", type=int, default=103, help="Scene id to visualize.")
     
     hparams = parser.parse_args()
