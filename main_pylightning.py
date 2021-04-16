@@ -83,7 +83,7 @@ class LitGNN(pl.LightningModule):
         if self.decay_rate != 0:
             return {
                 'optimizer': opt,
-                'lr_scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=opt, threshold=0.001, patience=3),
+                'lr_scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=opt, threshold=0.001, patience=3, verbose=True),
                 'monitor': "Sweep/val_rmse_loss"
             }
         
@@ -178,7 +178,7 @@ class LitGNN(pl.LightningModule):
         else:
         '''
         _, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
-        
+
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -186,7 +186,7 @@ class LitGNN(pl.LightningModule):
         if self.model_type == 'rgcn':
             rel_type = batched_graph.edata['rel_type'].long()
             norm = batched_graph.edata['norm']
-            pred = self.model(batched_graph, feats[:,:,:],e_w, rel_type,norm)
+            pred = self.model(batched_graph, feats,e_w, rel_type,norm)
         else:
             pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e, maps)   #pi,sigma,mu
         
@@ -288,6 +288,9 @@ class LitGNN(pl.LightningModule):
             #Input pos + heading + vel
             feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:,:] #torch.cat([feats[:,:,:self.input_dim], feats_vel], dim=-1)
         '''
+        #feats_vel,_ = compute_change_pos(feats,labels_pos, self.scale_factor)
+        #feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:]
+
         e_w = batched_graph.edata['w'].float()
         if self.model_type != 'gcn' and not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -359,6 +362,7 @@ class LitGNN(pl.LightningModule):
             
     def on_test_epoch_end(self):
         #wandb_logger.experiment.save(run.name + '.ckpt')
+        print(self.lr1, self.lr2)
         if not self.probabilistic:
             overall_loss_time = np.array(self.overall_loss_time_list)
             avg = [sum(overall_loss_time[:,i])/overall_loss_time.shape[0] for i in range(len(overall_loss_time[0]))]
@@ -498,7 +502,7 @@ if __name__ == '__main__':
     parser.add_argument('--probabilistic', action='store_true', help='use probabilistic loss function (MDN)')  
     #parser.add_argument('--att_ew', action='store_true', help='use this flag to add edge features in attention function (GAT)')    
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=True, help="Add edge features in attention function (GAT)")
-    parser.add_argument("--decay_rate", type=float, default=0.)
+    parser.add_argument("--decay_rate", type=float, default=1.)
     parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=False, help="Add HD Maps.")
 
     parser.add_argument('--nowandb', action='store_true', help='use this flag to DISABLE wandb logging')  

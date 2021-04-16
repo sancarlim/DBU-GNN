@@ -11,6 +11,7 @@ from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
 from torch.utils.data import DataLoader
 from models.MapEncoder import My_MapEncoder
 from models.scout import My_GATLayer, MultiHeadGATLayer
+from torchsummary import summary
 
 
 class MLP_Enc(nn.Module):
@@ -62,19 +63,22 @@ class MLP_Dec(nn.Module):
 
     
 class GAT_VAE(nn.Module):
-    def __init__(self, hidden_dim, dropout=0.2, feat_drop=0., attn_drop=0., heads=1,att_ew=False, ew_dims=1):
+    def __init__(self, hidden_dim, layers=2, dropout=0.2, feat_drop=0., attn_drop=0., heads=1,att_ew=False, ew_dims=1):
         super().__init__()
         self.heads = heads
+        self.layers = layers
         #self.embedding_e = nn.Linear(ew_dims, hidden_dim)
         self.resize_e = nn.ReplicationPad1d(hidden_dim//2-1)
         if heads == 1:
             self.gat_1 = My_GATLayer(hidden_dim, hidden_dim, feat_drop, attn_drop,att_ew, res_weight=res_weight, res_connection=res_connection ) 
-            self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection ) 
+            if layers>1:
+                self.gat_2 = My_GATLayer(hidden_dim, hidden_dim, 0., 0.,att_ew, res_weight=res_weight, res_connection=res_connection ) 
         else:
             self.gat_1 = MultiHeadGATLayer(hidden_dim, hidden_dim,  e_dims=hidden_dim//2*2 , res_weight=True, res_connection=True , num_heads=heads,feat_drop=feat_drop, attn_drop=attn_drop, att_ew=att_ew)            
             #self.embedding_e2 = nn.Linear(ew_dims, hidden_dim*heads)
-            self.resize_e2 = nn.ReplicationPad1d(hidden_dim*heads//2-1)
-            self.gat_2 = MultiHeadGATLayer(hidden_dim*heads,hidden_dim*heads, e_dims=hidden_dim*heads//2*2, res_weight=True , res_connection=True ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew)    
+            if layers>1:    
+                self.resize_e2 = nn.ReplicationPad1d(hidden_dim*heads//2-1)
+                self.gat_2 = MultiHeadGATLayer(hidden_dim*heads,hidden_dim*heads, e_dims=hidden_dim*heads//2*2, res_weight=True , res_connection=True ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew)    
 
         #self.reset_parameters()
 
@@ -88,10 +92,11 @@ class GAT_VAE(nn.Module):
         e = self.resize_e(torch.unsqueeze(e_w,dim=1)).flatten(start_dim=1)#self.embedding_e(e_w)
         g.edata['w']=e
         h = self.gat_1(g, h,snorm_n) 
-        if self.heads > 1:
-            e = self.resize_e2(torch.unsqueeze(e_w,dim=1)).flatten(start_dim=1) #self.embedding_e2(e_w)
-            g.edata['w']=e
-        h = self.gat_2(g, h, snorm_n) 
+        if self.layers > 1:
+            if self.heads > 1:
+                e = self.resize_e2(torch.unsqueeze(e_w,dim=1)).flatten(start_dim=1) #self.embedding_e2(e_w)
+                g.edata['w']=e
+            h = self.gat_2(g, h, snorm_n) 
         return h
     
 class VAE_GNN(nn.Module):
@@ -110,10 +115,10 @@ class VAE_GNN(nn.Module):
         ###############
         if backbone == 'map_encoder':
             self.feature_extractor = My_MapEncoder(input_channels = 1, input_size=112, 
-                                                    hidden_channels = [10,32,64,128,256], output_size = hidden_dim, 
-                                                    kernels = [5,5,3,3,3], strides = [1,2,2,2,2])
+                                                    hidden_channels = [16,32,32,40], output_size = 64, 
+                                                    kernels = [5,5,3,3], strides = [1,2,2,2])
             enc_dims = hidden_dim*2+output_dim    
-            dec_dims = z_dim + hidden_dim*2
+            dec_dims = z_dim + hidden_dim#*2
         
         elif backbone == 'resnet':       
             model_ft = resnet18(pretrained=True)
@@ -149,14 +154,22 @@ class VAE_GNN(nn.Module):
         #enc_dims = hidden_dim + output_dim
         #dec_dims = hidden_dim + z_dim
         ###############
-        self.embedding_h = nn.Linear(input_dim, hidden_dim)        
-
+        self.embedding_h = nn.Linear(input_dim, hidden_dim)     #self.embedding_h = nn.Linear(input_dim+64, hidden_dim)        
+        
         #############
         #  ENCODER  #
         #############
-        self.GNN_enc = GAT_VAE(enc_dims, dropout=dropout, feat_drop=feat_drop, attn_drop=attn_drop, heads=heads, att_ew=att_ew, ew_dims=ew_dims)
+        self.GNN_enc = GAT_VAE(enc_dims,layers=2, dropout=dropout, feat_drop=feat_drop, attn_drop=attn_drop, heads=heads, att_ew=att_ew, ew_dims=ew_dims)
         encoder_dims = enc_dims*heads
         self.MLP_encoder = MLP_Enc(encoder_dims+output_dim, z_dim, dropout=dropout)
+        '''
+        #############
+        #   PRIOR   #
+        #############
+        self.GNN_prior = GAT_VAE(enc_dims,layers=2, dropout=dropout, feat_drop=feat_drop, attn_drop=attn_drop, heads=heads, att_ew=att_ew, ew_dims=ew_dims)
+        encoder_dims = (enc_dims-output_dim)*heads
+        self.MLP_prior = MLP_Enc(encoder_dims+output_dim, z_dim, dropout=dropout)
+        '''
 
         #############
         #  DECODER  #
@@ -167,6 +180,8 @@ class VAE_GNN(nn.Module):
         self.base = nn.ModuleList([
             self.GNN_enc,
             self.MLP_encoder,
+            #self.GNN_prior,
+            #self.MLP_prior,
             self.GNN_decoder,
             self.MLP_decoder
         ])
@@ -231,7 +246,8 @@ class VAE_GNN(nn.Module):
         #Sample from gaussian distribution (BV, Z_dim)
         z_sample = torch.distributions.Normal(torch.zeros((feats.shape[0],self.z_dim), dtype=feats.dtype, device=feats.device), 
                                               torch.ones((feats.shape[0],self.z_dim), dtype=feats.dtype, device=feats.device)).sample()
-
+        #Sample from Half-Normal for covering more space
+        #z_sample = torch.distributions.half_normal.HalfNormal(torch.ones((feats.shape[0],self.z_dim), dtype=feats.dtype, device=feats.device)*2).sample()
         #DECODE 
         h_dec = torch.cat([maps_emb.flatten(start_dim=1), h_emb, z_sample],dim=-1)
         if self.bn:
@@ -248,11 +264,12 @@ class VAE_GNN(nn.Module):
         feats = feats.contiguous().view(feats.shape[0],-1)
         gt = gt.contiguous().view(gt.shape[0],-1)
 
-        # Input embedding
-        h_emb = self.embedding_h(feats) 
-
         # Map encoding
         maps_emb = self.feature_extractor(maps)
+
+        # Input embedding
+        #h = torch.cat([maps_emb.flatten(start_dim=1),feats], dim=-1)
+        h_emb = self.embedding_h(feats) 
 
         #### ENCODE ####
         # Embeddings concatenation
@@ -291,8 +308,8 @@ if __name__ == '__main__':
     output_dim = 2*future_frames 
 
     hidden_dims = round(hidden_dims / heads) 
-    model = VAE_GNN(input_dim, hidden_dims, 16, output_dim, bn=True,fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True, ew_dims=2, backbone='resnet')
-
+    model = VAE_GNN(input_dim, hidden_dims, 16, output_dim, bn=False,fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True, ew_dims=2, backbone='resnet')
+    #summary(model.feature_extractor, (1,112,112), device='cpu')
     test_dataset = nuscenes_Dataset(train_val_test='val', rel_types=True, history_frames=history_frames, future_frames=future_frames) 
     test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
 

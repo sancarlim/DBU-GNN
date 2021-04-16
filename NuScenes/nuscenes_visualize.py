@@ -39,7 +39,7 @@ future = 6
 history_frames = history*FREQUENCY
 future_frames = future*FREQUENCY
 total_frames = history_frames + future_frames #2s of history + 6s of prediction
-input_dim_model = history_frames*9 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
+input_dim_model = (history_frames-1)*9 #Input features to the model: x,y-global (zero-centralized), heading,vel, accel, heading_rate, type 
 output_dim = future_frames*2
 base_path='/media/14TBDISK/sandra/nuscenes_processed'
 DATAROOT = '/media/14TBDISK/nuscenes'
@@ -130,12 +130,18 @@ class LitGNN(pl.LightningModule):
             return 
         
         print(tokens_eval)
+        
         rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         last_loc = feats[:,-1:,:2].detach().clone() 
+        
+        feats_vel, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
+        feats_local = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:]
+        
+        
         if self.scale_factor == 1:
-            last_loc = last_loc*12.4354+0.1579
+            pass#last_loc = last_loc*12.4354+0.1579
         else:
-            last_loc = last_loc*rescale_xy      
+            last_loc = last_loc*rescale_xy     
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -144,7 +150,7 @@ class LitGNN(pl.LightningModule):
         prediction_all_agents = []  # [num_agents, num_modes, n_timesteps, state_dim]
         for i in range(25):
             #Model predicts relative_positions
-            preds = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e,maps)  # [N_agents, 12, 2]
+            preds = self.model.inference(batched_graph, feats_local,e_w,snorm_n,snorm_e,maps)  # [N_agents, 12, 2]
             preds=preds.view(preds.shape[0],self.future_frames,-1)  
             #Convert prediction to absolute positions
             for j in range(1,labels_pos.shape[1]):
@@ -212,11 +218,10 @@ class LitGNN(pl.LightningModule):
             category = annotation['category_name'].split('.')[0]
             attribute = nuscenes.get('attribute', annotation['attribute_tokens'][0])['name']
 
-
-            prediction = prediction_all_agents[:,idx]
             history = feats[idx,:,:2].cpu().numpy()
+            prediction = prediction_all_agents[:,idx]
             if self.scale_factor == 1:
-                history = history*12.4354+0.1579
+                pass#history = history*12.4354+0.1579
             else:
                 history = history*rescale_xy   
             #remove zero rows (no data in those frames) and rescale to obtain global coords.
@@ -316,7 +321,7 @@ class LitGNN(pl.LightningModule):
             ax.add_artist(circle)
         
         #ax.axis('off')
-        fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_' + self.model_type + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
+        fig.savefig(os.path.join(base_path, 'visualizations' , scene_name + '_HalfNormal_' + self.model_type + sample_token + '.jpg'), dpi=300, bbox_inches='tight')
         print('Image saved in: ', os.path.join(base_path, 'visualizations' , scene_name + '_' + sample_token + '.jpg'))
    
 def main(args: Namespace):
@@ -356,20 +361,20 @@ if __name__ == '__main__':
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
     parser.add_argument("--scale_factor", type=int, default=1, help="Wether to scale x,y global positions (zero-centralized)")
     parser.add_argument("--ew_dims", type=int, default=2, choices=[1,2], help="Edge features: 1 for relative position, 2 for adding relationship type.")
-    parser.add_argument("--z_dims", type=int, default=64, help="Dimensionality of the latent space")
+    parser.add_argument("--z_dims", type=int, default=25, help="Dimensionality of the latent space")
     parser.add_argument("--hidden_dims", type=int, default=768)
-    parser.add_argument("--model_type", type=str, default='scout', help="Choose aggregation function between GAT or GATED",
+    parser.add_argument("--model_type", type=str, default='vae_gat', help="Choose aggregation function between GAT or GATED",
                                         choices=['vae_gat', 'vae_gated', 'scout'])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--feat_drop", type=float, default=0.)
     parser.add_argument("--attn_drop", type=float, default=0.4)
     parser.add_argument("--heads", type=int, default=2, help='Attention heads (GAT)')
     parser.add_argument('--att_ew', type=str2bool, nargs='?', const=True, default=True, help="Add edge features in attention function (GAT)")
-    parser.add_argument('--ckpt', type=str, default='/media/14TBDISK/sandra/logs/comic-sweep-17/epoch=83-step=11255.ckpt', help='ckpt path.')   
+    parser.add_argument('--ckpt', type=str, default='/media/14TBDISK/sandra/logs/NuScenes VAE/dark-deluge-1630/epoch=22-step=3081.ckpt', help='ckpt path.')   
     parser.add_argument('--nowandb', action='store_true')
 
     parser.add_argument('--maps', type=str2bool, nargs='?', const=True, default=True, help="Add HD Maps.")
-    parser.add_argument("--backbone", type=str, default='resnet_gray', help="Choose CNN backbone.",
+    parser.add_argument("--backbone", type=str, default='resnet', help="Choose CNN backbone.",
                                         choices=['resnet_gray', 'mobilenet', 'resnet18', 'map_encoder'])
     parser.add_argument("--scene_id", type=int, default=103, help="Scene id to visualize.")
     
