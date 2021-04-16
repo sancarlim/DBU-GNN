@@ -132,7 +132,8 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         #self.all_feature[:,:,:self.history_frames,:2] = self.all_feature[:,:,:self.history_frames,:2]/rescale_xy
 
         ###### Normalize with training statistics to have 0 mean and std=1 #######
-        self.node_features = (self.all_feature[:,:,:self.history_frames,feature_id] - 0.1579) / 12.4354
+        self.node_features = self.all_feature[:,:,:self.history_frames,feature_id] 
+        #self.node_features[:,:,:,:2] = (self.node_features[:,:,:,:2] - 0.1579) / 12.4354
         self.node_labels = self.all_feature[:,:,self.history_frames:,:2] #- 0.1579) / 12.4354
 
         self.xy_dist=[spatial.distance.cdist(self.all_feature[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70

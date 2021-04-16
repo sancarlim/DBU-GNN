@@ -7,33 +7,10 @@ os.environ['DGLBACKEND'] = 'pytorch'
 import numpy as np
 import matplotlib.pyplot as plt
 from torchvision.models import resnet18
+from NuScenes.nuscenes_Dataset import nuscenes_Dataset, collate_batch
+from torch.utils.data import DataLoader
+from models.VAE_GNN import MLP_Dec, MLP_Enc
 
-
-class MLP_Enc(nn.Module):
-    "Encoder: MLP that takes GNN output as input and returns mu and log variance of the latent distribution."
-    "The stddev of the distribution is treated as the log of the variance of the normal distribution for numerical stability."
-    def __init__(self, in_dim, z_dim, dropout=0.2):
-        super(MLP_Enc, self).__init__()
-        self.in_dim = in_dim
-        self.z_dim = z_dim
-        self.linear = nn.Linear(in_dim, in_dim//2)
-        self.log_var = nn.Linear(in_dim//2, z_dim)
-        self.mu = nn.Linear(in_dim//2, z_dim)
-        self.dropout_l = nn.Dropout(dropout)
-
-    def reset_parameters(self):
-        """Reinitialize learnable parameters."""
-        nn.init.normal_(self.log_var.weight, 0, sqrt(1. / self.sigma.in_dim))
-        nn.init.xavier_normal_(self.mu.weight)
-        nn.init.kaiming_normal_(self.linear.weight, a=0.01, nonlinearity='leaky_relu')
-
-    def forward(self, h, gt):
-        h = torch.cat([h, gt], dim=-1) #concatenate gnn output and ground-truth
-        h = self.dropout_l(h)
-        h = F.leaky_relu(self.linear(h))
-        log_var = self.log_var(h) 
-        mu = self.mu(h)
-        return mu, log_var
 
 
 class GatedGCN_layer(nn.Module):
@@ -135,69 +112,107 @@ class GATED_VAE(nn.Module):
             h=F.leaky_relu(self.linear(h))
         return h, e
     
+
 class VAE_GATED(nn.Module):
-    def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2,  ew_dims=1, map_encoding=False):
+    def __init__(self, input_dim, hidden_dim, z_dim, output_dim, fc=False, dropout=0.2,  ew_dims=1,  backbone='map_encoder', freeze=6,
+                    bn=False, gn=False):
         super().__init__()
         self.fc = fc
         self.z_dim = z_dim
-        self.map_encoding = map_encoding
+        self.bn = bn
+        self.gn = gn
 
-        if self.map_encoding:
+        ###############
+        # Map Encoder #
+        ###############
+        if backbone == 'map_encoder':
+            self.feature_extractor = My_MapEncoder(input_channels = 1, input_size=112, 
+                                                    hidden_channels = [10,32,64,128,256], output_size = hidden_dim, 
+                                                    kernels = [5,5,3,3,3], strides = [1,2,2,2,2])
+            enc_dims = hidden_dim*2+output_dim    
+            dec_dims = z_dim + hidden_dim*2
+        
+        elif backbone == 'resnet':       
             model_ft = resnet18(pretrained=True)
-            self.feature_extractor = torch.nn.Sequential(*list(model_ft.children())[:-1])
+            modules = list(model_ft.children())[:-3]
+            modules.append(torch.nn.AdaptiveAvgPool2d((1, 1))) 
+            self.feature_extractor = torch.nn.Sequential(*modules) 
             ct=0
             for child in self.feature_extractor.children():
                 ct+=1
-                if ct < 7:
+                if ct < freeze:  #freeze 2 BasicBlocks , train last one 128 -> 256
                     for param in child.parameters():
                         param.requires_grad = False
-            
-            self.linear_cat = nn.Linear(hidden_dim + 512, hidden_dim) 
+            enc_dims = hidden_dim + output_dim + 256
+            dec_dims = z_dim + hidden_dim + 256
+        
+        elif backbone == 'resnet_gray':
+            resnet = resnet18(pretrained=False)
+            modules = list(resnet.children())[:-3]
+            modules.append(torch.nn.AdaptiveAvgPool2d((1, 1))) 
+            modules[0] = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3,bias=False)  #stride=1 if list[:-1]
+            nn.init.kaiming_normal_(modules[0].weight, mode='fan_out', nonlinearity='relu')
+            self.feature_extractor=torch.nn.Sequential(*modules)   
+            enc_dims = hidden_dim + output_dim + 256
+            dec_dims = z_dim + hidden_dim + 256
 
-        #Input embeddings
+
+        ############################
+        # Input Features Embedding #
+        ############################
         self.embedding_h = nn.Linear(input_dim, hidden_dim)
-        self.embedding_e = nn.Linear(ew_dims, hidden_dim)
+        self.embedding_e = nn.Linear(ew_dims, enc_dims)
         
-        #Input GNN for encoding interactions
-        self.GNN_inp = GATED_VAE(hidden_dim, fc=fc, dropout=dropout)
+        #############
+        #  ENCODER  #
+        #############
+        self.GNN_enc = GATED_VAE(enc_dims, fc=fc, dropout=dropout)
+        self.MLP_encoder = MLP_Enc(enc_dims, z_dim, dropout=dropout)
 
-        #Encode ground_truth trajectories
-        self.embedding_gt = nn.Linear(output_dim, hidden_dim)
-        self.GNN_enc_gt = GATED_VAE(hidden_dim, fc=fc, dropout=dropout)
-        
-        #ENCODER
-        input_enc_dims = hidden_dim if fc else hidden_dim*2 
-        self.encoder = MLP_Enc(input_enc_dims, z_dim, dropout=dropout)
-
-        #DECODER
-        dec_dims = z_dim + hidden_dim//2 if fc else (z_dim + hidden_dim)  #768+100  512+100  1024+100
-        self.embedding_e_dec = nn.Linear(hidden_dim, dec_dims)
+        #############
+        #  DECODER  #
+        ############# 
+        self.embedding_e_dec = nn.Linear(ew_dims, dec_dims)
         self.GNN_decoder = GATED_VAE(dec_dims, fc=fc, dropout=dropout) 
-        self.MLP_decoder = nn.Sequential(
-            nn.Linear(dec_dims, dec_dims//2),  #868->434  ,  612->306  , 1124-->562
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(dec_dims//2, dec_dims//4),   
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(dec_dims//4, output_dim)  
-        )
+        self.MLP_decoder = MLP_Dec(dec_dims+z_dim, dec_dims, output_dim, dropout)
 
-        if fc:
-            self.dropout_l = nn.Dropout(dropout)
-            self.linear = nn.Linear(self.gat_2.out_feats, self.gat_2.out_feats//2)
-            nn.init.kaiming_normal_(self.linear.weight, a=0.01, nonlinearity='leaky_relu') 
+        self.base = nn.ModuleList([
+            self.embedding_e,
+            self.embedding_e_dec,
+            self.GNN_enc,
+            self.MLP_encoder,
+            self.GNN_decoder,
+            self.MLP_decoder
+        ])
+
+        if self.bn:
+            self.bn_enc = nn.BatchNorm1d(enc_dims) 
+            self.bn_dec = nn.BatchNorm1d(dec_dims) 
+            self.base.append(self.bn_enc)
+            self.base.append(self.bn_dec)
+        elif self.gn:
+            self.gn_enc = nn.GroupNorm(32, enc_dims)
+            self.gn_dec = nn.GroupNorm(32, dec_dims)
+            self.base.append(self.gn_enc)
+            self.base.append(self.gn_dec)
+
         self.reset_parameters()
 
     def reset_parameters(self):
         """Reinitialize learnable parameters."""
+        if self.bn:
+            nn.init.constant_(self.bn_enc.weight, 1)
+            nn.init.constant_(self.bn_enc.bias, 0)
+            nn.init.constant_(self.bn_dec.weight, 1)
+            nn.init.constant_(self.bn_dec.bias, 0)
+        elif self.gn:
+            nn.init.constant_(self.gn_enc.weight, 1)
+            nn.init.constant_(self.gn_enc.bias, 0)
+            nn.init.constant_(self.gn_dec.weight, 1)
+            nn.init.constant_(self.gn_dec.bias, 0)
         nn.init.xavier_normal_(self.embedding_h.weight)
         nn.init.xavier_normal_(self.embedding_e.weight)          
-        nn.init.xavier_normal_(self.embedding_e_dec.weight)    
-        nn.init.xavier_normal_(self.embedding_gt.weight)      
-        nn.init.kaiming_normal_(self.MLP_decoder[0].weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.MLP_decoder[3].weight, nonlinearity='relu')
-        nn.init.xavier_normal_(self.MLP_decoder[6].weight)
+        nn.init.xavier_normal_(self.embedding_e_dec.weight) 
     
     def reparameterize(self, mean, logvar):
         """
@@ -223,28 +238,25 @@ class VAE_GATED(nn.Module):
         feats = feats.contiguous().view(feats.shape[0],-1)
         
         # Input embedding
-        h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
-        e = self.embedding_e(e_w)
-        g.edata['w']=e
+        h_emb = self.embedding_h(feats)  #input (N, 24)- (N,hid)
+        e_emb = self.embedding_e_dec(e_w)
+        g.edata['w']=e_emb
 
-        if self.map_encoding:
-            # Maps feature extraction
-            maps_embedding = self.feature_extractor(maps)
+        # Maps feature extraction
+        maps_emb = self.feature_extractor(maps)
 
-            # Embeddings concatenation
-            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
-            h = self.linear_cat(h)
-
-        # Input GNN
-        h, e_inp = self.GNN_inp(g, h, e, snorm_n, snorm_e)
         #Sample from gaussian distribution (BV, Z_dim)
-        z_sample = torch.distributions.Normal(torch.zeros((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device), torch.ones((h.shape[0],self.z_dim), dtype=h.dtype, device=h.device)).sample()
+        z_sample = torch.distributions.Normal(torch.zeros((h_emb.shape[0],self.z_dim), dtype=h_emb.dtype, device=h_emb.device), 
+                                              torch.ones((h_emb.shape[0],self.z_dim), dtype=h_emb.dtype, device=h_emb.device)).sample()
         
         #DECODE 
-        h_dec = torch.cat([h, z_sample],dim=-1)
-        #Embedding for having dimmensions of edge feats = dimmensions of node feats
-        e_dec = self.embedding_e_dec(e_inp)
-        h, _ = self.GNN_decoder(g,h_dec,e_dec,snorm_n, snorm_e)
+        h_dec = torch.cat([maps_emb.flatten(start_dim=1), h_emb, z_sample],dim=-1)
+        if self.bn:
+            h_dec = self.bn_dec(h_dec)
+        elif self.gn:
+            h_dec = self.gn_dec(h_dec)
+        h, _ = self.GNN_decoder(g,h_dec,e_emb,snorm_n, snorm_e)
+        h = torch.cat([h, z_sample],dim=-1)
         recon_y = self.MLP_decoder(h)
         return recon_y
     
@@ -254,39 +266,62 @@ class VAE_GATED(nn.Module):
         gt = gt.contiguous().view(gt.shape[0],-1)
 
         # Input embedding
-        h = self.embedding_h(feats)  #input (N, 24)- (N,hid)
-        e = self.embedding_e(e_w)
-        g.edata['w']=e
+        h_emb = self.embedding_h(feats)  #input (N, 24)- (N,hid)
+        e_emb = self.embedding_e(e_w)
+        g.edata['w']=e_emb
 
-        if self.map_encoding:
-            # Maps feature extraction
-            maps_embedding = self.feature_extractor(maps)
+        # Maps feature extraction
+        maps_emb = self.feature_extractor(maps)
 
-            # Embeddings concatenation
-            h = torch.cat([maps_embedding.squeeze(), h], dim=-1)
-            h = self.linear_cat(h)
+        # Embeddings concatenation
+        h = torch.cat([maps_emb.flatten(start_dim=1), h_emb, gt], dim=-1)
+        if self.bn:
+            h = self.bn_enc(h)
+        elif self.gn:
+            h = self.gn_enc(h)
 
-        # Input GNN
-        h, e_inp = self.GNN_inp(g, h, e, snorm_n, snorm_e)
+        #### ENCODE ####
+        # Embeddings concatenation
+        h = torch.cat([maps_emb.flatten(start_dim=1), h_emb, gt], dim=-1)
+        h, e = self.GNN_enc(g, h, e_emb, snorm_n, snorm_e)
+        mu, log_var = self.MLP_encoder(h) 
         
-        #ENCODE
-        # Encode ground truth trajectories to have the same shape as h
-        h_gt = self.embedding_gt(gt)
-        h_gt, _ = self.GNN_enc_gt(g, h_gt, e, snorm_n, snorm_e)
-        mu, log_var = self.encoder(h, h_gt)   # Latent distribution
-        #Sample from the latent distribution
+        #### Sample from the latent distribution ###
         z_sample = self.reparameterize(mu, log_var)
         
-        #DECODE 
-        h_dec = torch.cat([h, z_sample],dim=-1)
+        #### DECODE #### 
+        h_dec = torch.cat([maps_emb.flatten(start_dim=1), h_emb, z_sample],dim=-1)
+        if self.bn:
+            h = self.bn_dec(h_dec)
+        elif self.gn:
+            h = self.gn_dec(h_dec)
+        
         #Embedding for having dimmensions of edge feats = dimmensions of node feats
-        e_dec = self.embedding_e_dec(e_inp)
+        e_dec = self.embedding_e_dec(e_w)
         h, _ = self.GNN_decoder(g,h_dec,e_dec,snorm_n, snorm_e)
+        h = torch.cat([h, z_sample],dim=-1)
         recon_y = self.MLP_decoder(h)
         return recon_y, mu, log_var
 
 if __name__ == '__main__':
-    model = VAE_GATED(48, 512, 128, 24, fc=False, dropout=0.2,feat_drop=0., attn_drop=0., heads=2,att_ew=True)
+    history_frames = 4
+    future_frames = 12
+    hidden_dims = 768
+    heads = 2
+
+    input_dim = 9*history_frames
+    output_dim = 2*future_frames 
+
+    model = VAE_GATED(input_dim, hidden_dims, 16, output_dim, bn=True,fc=False, dropout=0.2, ew_dims=2, backbone='resnet')
     print(model)
 
+    test_dataset = nuscenes_Dataset(train_val_test='val', rel_types=True, history_frames=history_frames, future_frames=future_frames) 
+    test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_batch)
+
+    for batch in test_dataloader:
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, maps = batch
+        e_w = batched_graph.edata['w']
+        y, mu, log_var = model(batched_graph, feats,e_w,snorm_n,snorm_e, labels_pos, maps)
+        print(y.shape)
+    
     
