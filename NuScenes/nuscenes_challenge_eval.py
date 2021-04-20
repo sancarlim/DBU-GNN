@@ -44,6 +44,10 @@ class LitGNN(pl.LightningModule):
         self.rel_types = rel_types
         self.scale_factor = scale_factor
         self.challenge_predictions = []
+        f = open('/media/14TBDISK/nuscenes/maps/prediction/prediction_scenes.json')
+        self.prediction_scenes = json.load(f)  #Dict with keys "scene_id" : list("instances_samples")
+
+        self.rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         
     
     def forward(self, graph, feats,e_w,snorm_n,snorm_e):
@@ -63,14 +67,13 @@ class LitGNN(pl.LightningModule):
         pass
          
     def test_step(self, test_batch, batch_idx):
-        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, tokens_eval, scenes_ids, mean_xy, maps = test_batch
+        batched_graph, output_masks,snorm_n, snorm_e, feats, labels_pos, tokens_eval, scene_id, mean_xy, maps = test_batch
         
         last_loc = feats[:,-1:,:2].detach().clone() 
-        rescale_xy=torch.ones((1,1,2), device=self.device)*self.scale_factor
         feats_vel, labels = compute_change_pos(feats,labels_pos, self.scale_factor)
         feats = torch.cat([feats_vel, feats[:,:,2:]], dim=-1)[:,1:]
         
-        last_loc = last_loc*rescale_xy       
+        #last_loc = last_loc*self.rescale_xy       
         e_w = batched_graph.edata['w'].float()
         if not self.rel_types:
             e_w= e_w.unsqueeze(1)
@@ -94,10 +97,11 @@ class LitGNN(pl.LightningModule):
 
         prediction_all_agents = np.array(prediction_all_agents)
         for token in tokens_eval:
-            idx = np.where(np.array(tokens_eval)== token[0])[0][0]
-            instance, sample = token
-            pred = Prediction(str(instance), str(sample), prediction_all_agents[:,idx], np.ones(25)*1/25)  #need the pred to have 2d
-            self.challenge_predictions.append(pred.serialize())
+            if str(token[0]+'_'+token[1]) in self.prediction_scenes['scene-'+ str(scene_id).zfill(4)]:
+                idx = np.where(np.array(tokens_eval)== token[0])[0][0]
+                instance, sample = token
+                pred = Prediction(str(instance), str(sample), prediction_all_agents[:,idx], np.ones(25)*1/25)  #need the pred to have 2d
+                self.challenge_predictions.append(pred.serialize())
     
     def test_epoch_end(self, outputs):
         json.dump(self.challenge_predictions, open(os.path.join(base_path, 'challenge_inference.json'),'w'))

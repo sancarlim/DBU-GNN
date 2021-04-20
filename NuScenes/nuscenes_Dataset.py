@@ -70,6 +70,8 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         elif train_val_test == 'test':
             train_val_test = 'val'
         self.raw_dir = os.path.join(base_path, 'nuscenes_step2_seq_'+ train_val_test +'.pkl' )
+        if challenge_eval: 
+            self.raw_dir = os.path.join(base_path,'nuscenes_challenge_global_step2_test.pkl')
         self.challenge_eval = challenge_eval
         self.transform = transforms.Compose(
                             [
@@ -135,6 +137,7 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
         self.node_features = self.all_feature[:,:,:self.history_frames,feature_id] 
         #self.node_features[:,:,:,:2] = (self.node_features[:,:,:,:2] - 0.1579) / 12.4354
         self.node_labels = self.all_feature[:,:,self.history_frames:,:2] #- 0.1579) / 12.4354
+        #self.node_labels[:,:,:,2:] = ( self.node_labels[:,:,:,2:] - 0.2 ) / 1.79     # Normalize heading (mean 0.2 std 1.79) for z0 loss.
 
         self.xy_dist=[spatial.distance.cdist(self.all_feature[i][:,now_history_frame,:2], self.node_features[i][:,now_history_frame,:2]) for i in range(len(self.all_feature))]  #5010x70x70
         
@@ -180,8 +183,8 @@ class nuscenes_Dataset(torch.utils.data.Dataset):
 
 if __name__ == "__main__":
     
-    val_dataset = nuscenes_Dataset(train_val_test='val', challenge_eval=False)  #3509
-    train_dataset = nuscenes_Dataset(train_val_test='train', challenge_eval=False)  #3509
+    val_dataset = nuscenes_Dataset(train_val_test='val', challenge_eval=True)  #3509
+    #train_dataset = nuscenes_Dataset(train_val_test='train', challenge_eval=False)  #3509
     #test_dataset = nuscenes_Dataset(train_val_test='test', challenge_eval=True)  #1754
     test_dataloader=iter(DataLoader(train_dataset, batch_size=512, shuffle=False, collate_fn=collate_batch) )
     for batched_graph, masks, snorm_n, snorm_e, feats, gt, maps in test_dataloader:
