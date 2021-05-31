@@ -55,13 +55,14 @@ def read_tracks(track_file, static_info):
     df_meta = pandas.read_csv(static_info)
     
     #filter some of the parked vehicles , EXCEPT FOR VISUALIZATION
+    '''
     if test == True:
 
         max_num_frames = df_meta['numFrames'].max()
         id_parked_objects = list(df_meta[df_meta['numFrames']==max_num_frames].trackId)
         #del id_parked_objects[-10:]  #keep 10 parked cars
         df = df[~df['trackId'].isin(id_parked_objects)]
-    '''    
+       
         #filter out no-car or ped objects
         list_car_obj = list(df_meta[df_meta['class']=='car'].trackId)
         list_ped_obj = list(df_meta[df_meta['class']=='pedestrian'].trackId)
@@ -70,7 +71,7 @@ def read_tracks(track_file, static_info):
     '''
 
     # To extract every track, group the rows by the track id
-    raw_tracks = df.groupby(["frame"], sort=False)
+    raw_tracks = df.groupby(["frame"], sort=True)
     #ortho_px_to_meter = meta_info["orthoPxToMeter"]
     tracks = []
     for frame, track_rows in raw_tracks:
@@ -121,12 +122,12 @@ def read_static_info(static_tracks_file):
         'class':{
             'car':1,
             'pedestrian':2,
-            'truck_bus':3, #truck_bus
+            'truck':3, #truck_bus
             'bicycle':4,
-            #'van': 5,
-            #'motorcycle': 6,
-            #'trailer': 7,
-            #'bus': 8
+            'van': 1,
+            'motorcycle': 4,
+            'trailer': 3,
+            'bus': 3
         }
     }
 
@@ -219,8 +220,6 @@ def pol2cart(th, r):
 def process_data(tracks,static_info, start_ind, end_ind, observed_last):
     #tracks es una lista de dict donde cada fila es un frame
     #static info es una lista de dict [{column->value},{},...]
-    if observed_last>240: #EL ultimo que sale es obs_last 238 y end 250
-        print('stop')
     visible_object_id_list = tracks[observed_last]["trackId"] # object_id appears at the last observed frame
     #para ver los obj visibles en esa secuencia miramos el final de la sec
     num_visible_object = visible_object_id_list.size # number of current observed objects
@@ -249,9 +248,13 @@ def process_data(tracks,static_info, start_ind, end_ind, observed_last):
         # we add mark "1" to the end of each row to indicate that this row exists, using list(pra_now_dict[frame_ind][obj_id])+[1] 
         # -mean_xy is used to zero_centralize data
         # now_frame_feature_dict = {obj_id : list(pra_now_dict[frame_ind][obj_id]-mean_xy)+[1] for obj_id in pra_now_dict[frame_ind] if obj_id in visible_object_id_list}
-        now_frame_feature_dict = {obj_id : (list(tracks[frame_ind]['position'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]-mean_xy)+ list(tracks[frame_ind]['velocity'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]) + list(tracks[frame_ind]['info_frame'])  + list(tracks[frame_ind]['info_agent'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])])+ [static_info[obj_id]['class']] + [1]
-         if obj_id in visible_object_id_list else list(tracks[frame_ind]['position'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]-mean_xy) + list(tracks[frame_ind]['velocity'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]) + list(tracks[frame_ind]['info_frame'])  + list(tracks[frame_ind]['info_agent'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]) + [static_info[obj_id]['class']] + [0]) 
-         for obj_id in tracks[frame_ind]["trackId"] }
+        now_frame_feature_dict = {obj_id : (list(tracks[frame_ind]['position'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]-mean_xy)+
+             list(tracks[frame_ind]['velocity'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])]) + 
+             list(tracks[frame_ind]['info_frame'])  + 
+             list(tracks[frame_ind]['info_agent'][int(np.where(tracks[frame_ind]['trackId']==(obj_id))[0])])+ 
+             [static_info[obj_id]['class']] +
+             [1 if obj_id in visible_object_id_list else 0] )
+             for obj_id in tracks[frame_ind]["trackId"] }
         # if the current object is not at this frame, we return all 0s by using dict.get(_, np.zeros(11))
         now_frame_feature = np.array([now_frame_feature_dict.get(vis_id, np.zeros(total_feature_dimension)) for vis_id in now_all_object_id])
         object_feature_list.append(now_frame_feature)
@@ -271,7 +274,7 @@ def generate_train_data(file_track_path, file_static_path):
     Return: feature and adjacency_matrix
         feature: (N, C, T, V) 
             N is the number of sequences in file_path 
-            C is the dimension of features, 10raw_feature + 1mark(valid data or not)
+            C is the dimension of features: 10 raw_feature + mask(valid data or not)
             T is the temporal length of the data. history_frames + future_frames
             V is the maximum number of objects. zero-padding for less objects. 
     '''
@@ -284,7 +287,7 @@ def generate_train_data(file_track_path, file_static_path):
     all_adjacency_list = []
     all_mean_list = []
     visible_object_indexes_list=[]
-    step = 3 if herz==2.5 else 3
+    step = 8 if herz==2.5 else 3
     for start_ind in frame_id_set[:-total_frames+1:step]:  #[:-total_frames+1:2]#recorre el fichero dividiendo los datos en clips de 6+6 frames a 5Hz
         start_ind = int(start_ind)
         end_ind = int(start_ind + total_frames)
@@ -323,7 +326,7 @@ def generate_data(file_tracks_list, file_static_list):
     all_mean_xy = np.array(all_mean_xy) #(5010, 2) Train  MEDIAS xy de cada secuencia de 12 frames
     all_visible_object_indexes = np.array(all_visible_object_indexes)  
     print(all_data.shape[0])
-    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/inD_2.5Hz8_12f_30_noparked.pkl'
+    save_path = '/home/sandra/PROGRAMAS/DBU_Graph/data/rounD_2.5Hz8_8f_sinsolape.pkl'
     with open(save_path, 'wb') as writer:
         pickle.dump([all_data, all_adjacency, all_mean_xy, all_visible_object_indexes], writer)
     print('Data successfully saved.')
@@ -334,9 +337,9 @@ if __name__ == '__main__':
     test = True
     herz = 2.5
     history_frames = 3 if herz==1 else 8 # 5 second * 1 frame/second
-    future_frames = 3 if herz==1 else 12 # 5 second * 1 frame/second
+    future_frames = 3 if herz==1 else 8 # 5 second * 1 frame/second
     total_frames = history_frames + future_frames
-    input_root_path = '/home/sandra/PROGRAMAS/raw_data/inD/debug_30/'
+    input_root_path = '/home/sandra/PROGRAMAS/raw_data/rounD/data/'
     tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracks.csv")))
     static_tracks_files = sorted(glob.glob(os.path.join(input_root_path , "*_tracksMeta.csv")))
     recording_meta_files = sorted(glob.glob(os.path.join(input_root_path , "*_recordingMeta.csv")))

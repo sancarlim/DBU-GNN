@@ -13,11 +13,11 @@ def create_args():
     # --- Input paths ---
     config_specification.add_argument('--input_path', default="/home/sandra/PROGRAMAS/raw_data/inD/data/",
                                       help="Dir with track files", type=str)
-    config_specification.add_argument('--recording_name', default="30",
+    config_specification.add_argument('--recording_name', default="07",
                                       help="Choose recording name.", type=str)
 
     # --- Settings ---
-    config_specification.add_argument('--scale_down_factor', default=12,
+    config_specification.add_argument('--scale_down_factor', default=12, #12
                                       help="Factor by which the tracks are scaled down to match a scaled down image.",
                                       type=float)
     # --- Visualization settings ---
@@ -28,7 +28,7 @@ def create_args():
                                       help="Optional: decide whether to plot the direction triangle or not.",
                                       type=bool)
     config_specification.add_argument('--plotBoundingBoxes', default=True,
-                                      help="Optional: decide whether to plot the bounding boxes or not.",
+                                      help="Optional: decide whether to plot the bounding boxes ornot.",
                                       type=bool)
     config_specification.add_argument('--plotDirectionTriangle', default=True,
                                       help="Optional: decide whether to plot the direction triangle or not.",

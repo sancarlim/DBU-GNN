@@ -36,12 +36,12 @@ from captum.attr import LayerConductance, LayerIntegratedGradients
 from captum.attr import NeuronConductance
 import argparse
 
-device='cuda'
+device='cpu'
 parser = argparse.ArgumentParser()
-parser.add_argument('--goal', type=str , default='vis' ,help='metrics / visualize model weights')
-parser.add_argument('--recording', type=int , default=7 )
+parser.add_argument('--goal', type=str , default='test' ,help='metrics / visualize model weights')
+parser.add_argument('--recording', type=int , default=0 )
 parser.add_argument('--frame', type=int , default=730 )
-parser.add_argument('--dataset', type=str , default='ind' )
+parser.add_argument('--dataset', type=str , default='round' )
 parser.add_argument('--target', type=int , default=5, help='Output to be predicted' )
 args = parser.parse_args()
 dataset = args.dataset  
@@ -107,7 +107,7 @@ def explain(data, feats, snorm_n, snorm_e, target=1):
     input_mask = (data.edata['w']).requires_grad_(True).to(device) 
     ig = IntegratedGradients(model_forward_ig)
     mask = ig.attribute(input_mask, target=target,
-                        additional_forward_args=(data,feats, snorm_n,snorm_e,),
+                        additional_forward_args=(data,feats[:,:,:feat_size], snorm_n,snorm_e,),
                         internal_batch_size=data.edata['w'].shape[0]) #, return_convergence_delta=True
     '''
     elif method == 'saliency':
@@ -212,7 +212,7 @@ def visualize(LitGCN_sys,test_dataloader):
     cond_vals = cond_vals.detach().numpy()
     visualize_importances(range(64),np.mean(cond_vals, axis=0),title="Average Neuron Importances", axis_title="Neurons")
     '''
-    edge_mask = explain(graph.to(device), feats.to(device), snorm_n, snorm_e, target=args.target)
+    edge_mask = explain(graph.to(device), feats.to(device), snorm_n.to(device) , snorm_e.to(device) , target=args.target)
     graph.edata['w'] = torch.from_numpy(edge_mask)
     draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, edge_mask, draw_edge_labels=False)
 
@@ -227,7 +227,7 @@ def visualize_att(LitGCN_sys,test_dataloader):
 
     LitGCN_sys.model.eval()
     model= LitGCN_sys.model.to(device)
-    out, att1, att2 = model_forward(feats.to(device), graph.to(device), snorm_n, snorm_e)
+    out, att1, att2 = model_forward(feats[:,:,:feat_size].to(device), graph.to(device), snorm_n, snorm_e)
     if heads == 1:
         draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att1, draw_edge_labels=False)
         draw_graph(graph, feats.float()[:,history_frames-1,:2],track_info, att2, draw_edge_labels=False)
@@ -396,8 +396,8 @@ class LitGNN(pl.LightningModule):
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats,e_w, rel_type,norm)
         else:
-            pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
-        pred=pred.view(pred.shape[0],labels.shape[1],-1)
+            pred = self.model(batched_graph, feats[:,:,:feat_size],e_w,snorm_n,snorm_e)
+        pred=pred.view(pred.shape[0],12,2)
         
         #For visualization purposes
         self.gt_x_list.append((labels[:,:self.future_frames,0].detach().cpu().numpy().reshape(-1)+mean_xy[0])* output_masks[:,self.history_frames:self.total_frames,:].detach().cpu().numpy().reshape(-1))
@@ -467,17 +467,20 @@ class LitGNN(pl.LightningModule):
         var = [sum((overall_loss_car[:,i]-avg[i])**2)/overall_loss_car.shape[0] for i in range(overall_loss_car.shape[1])]
         print('CAR Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
         print('CAR Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
-        overall_loss_ped = np.array(self.overall_loss_ped)
-        avg = [sum(overall_loss_ped[:,i])/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
-        var = [sum((overall_loss_ped[:,i]-avg[i])**2)/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
-        print('VRU Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
-        print('VRU Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
 
-        overall_loss_bic = np.array(self.overall_loss_bic)
-        avg = [sum(overall_loss_bic[:,i])/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
-        var = [sum((overall_loss_bic[:,i]-avg[i])**2)/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
-        print('Bicycle Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
-        print('Bicycle Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
+        if len(self.overall_loss_ped) != 0:
+            overall_loss_ped = np.array(self.overall_loss_ped)
+            avg = [sum(overall_loss_ped[:,i])/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
+            var = [sum((overall_loss_ped[:,i]-avg[i])**2)/overall_loss_ped.shape[0] for i in range(overall_loss_ped.shape[1])]
+            print('VRU Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
+            print('VRU Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
+
+        if len(self.overall_loss_bic) != 0:
+            overall_loss_bic = np.array(self.overall_loss_bic)
+            avg = [sum(overall_loss_bic[:,i])/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
+            var = [sum((overall_loss_bic[:,i]-avg[i])**2)/overall_loss_bic.shape[0] for i in range(overall_loss_bic.shape[1])]
+            print('Bicycle Loss avg: ',[round(n,2) for n in avg], sum(avg)/len(avg))
+            print('Bicycle Loss variance: ',[round(n,2) for n in var], sum(var)/len(var))
 
         overall_long_err = np.array(self.overall_long_err_car)
         avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
@@ -489,15 +492,16 @@ class LitGNN(pl.LightningModule):
         print('\n'.join('CAR Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
         print('\n'.join('CAR Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
-        overall_long_err = np.array(self.overall_long_err_ped)
-        avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
-        var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
-        
-        overall_lat_err = np.array(self.overall_lat_err_ped)
-        avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
-        var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
-        print('\n'.join('PED Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
-        print('\n'.join('PED Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
+        if len(self.overall_loss_ped) != 0:
+            overall_long_err = np.array(self.overall_long_err_ped)
+            avg_long = [sum(overall_long_err[:,i])/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
+            var_long = [sum((overall_long_err[:,i]-avg[i])**2)/overall_long_err.shape[0] for i in range(overall_long_err.shape[1])]
+            
+            overall_lat_err = np.array(self.overall_lat_err_ped)
+            avg_lat = [sum(overall_lat_err[:,i])/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
+            var_lat = [sum((overall_lat_err[:,i]-avg[i])**2)/overall_lat_err.shape[0] for i in range(overall_lat_err.shape[1])]
+            print('\n'.join('PED Long avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_long, var_long))))
+            print('\n'.join('PED Lat avg error in frame {}: {:.2f}, var: {:.2f}'.format(i+1, avg, var) for i,(avg,var) in enumerate(zip(avg_lat, var_lat))))
 
 
         #For visualization purposes
@@ -517,18 +521,19 @@ class LitGNN(pl.LightningModule):
 
         df_vis = pd.DataFrame.from_dict(track_vis_dict)   #1935(xVxTpred)x5
         raw_preds = df_vis.groupby(['recording_id'])
-        for csv in raw_preds:
-            csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/data/'+str(int(csv[0]))+'_pred.csv')
-        
+        #for csv in raw_preds:
+            #csv[1].to_csv('/home/sandra/PROGRAMAS/raw_data/inD/data/'+str(int(csv[0]))+'_pred.csv')
 
 
 if __name__ == "__main__":
 
-    hidden_dims = 1024
+    hidden_dims = 1256
     heads = 3
     model_type = 'gat'
     history_frames = 8
     future_frames= 12
+    feat_size=6
+
     recording = args.recording
     if dataset.lower() == 'ind':
         test_dataset = inD_DGLDataset(train_val='test', history_frames=history_frames, future_frames=future_frames, model_type=model_type,  test=True, classes=(1,2,3,4), recording=recording)  #1935
@@ -538,7 +543,7 @@ if __name__ == "__main__":
         print(len(test_dataset))
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_test)  
     print('Recording: ', recording)
-    input_dim = 5*history_frames
+    input_dim = feat_size*history_frames
     output_dim = 2*future_frames
 
     if model_type == 'gat':
@@ -546,28 +551,24 @@ if __name__ == "__main__":
         if args.goal == 'test':
             model = My_GAT(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.25, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
         else:
-            model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True).to(device)
+            model = My_GAT_vis(input_dim=input_dim, hidden_dim=hidden_dims, heads=heads, output_dim=output_dim,dropout=0.1, bn=True, feat_drop=0, attn_drop=0, att_ew=True)
     elif model_type == 'gcn':
         model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
-        model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn= False)
+        model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn= True).to(device)
     elif model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=True, bn=False, dropout=0.1)
     
     if dataset == 'round' and future_frames==12:
         future_frames = 8
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/DGX/iconic-sweep-5/epoch=19-step=7219.ckpt',model=LitGCN_sys.model)
-    #DGX/gxxhzlvu/checkpoints/epoch=93-step=3289.ckpt ESTE ES EL DE 8.89 DE LA DGX
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path='/home/sandra/PROGRAMAS/DBU_Graph/logs/DGX/spring-sweep-4/epoch=42-step=15522.ckpt',model=LitGCN_sys.model,  input_dim=feat_size, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
+    #spring-sweep-4/epoch=42-step=15522.ckpt
     #e44289k5/checkpoints/'+'epoch=49.ckpt
     
-    LitGCN_sys.model_type = model_type
-    LitGCN_sys.history_frames = history_frames
-    LitGCN_sys.future_frames = future_frames
-    LitGCN_sys.total_frames = history_frames+future_frames
 
     if args.goal  == 'test':
-        trainer = pl.Trainer(gpus=1, profiler=True)
+        trainer = pl.Trainer(gpus=0, profiler=True)
         trainer.test(LitGCN_sys, test_dataloaders=test_dataloader)
     elif args.goal == 'vis':
         visualize(LitGCN_sys, test_dataloader)

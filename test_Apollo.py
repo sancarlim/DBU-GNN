@@ -28,6 +28,8 @@ from models.rnn_baseline import RNN_baseline
 from models.RGCN import RGCN
 from models.Gated_MDN import Gated_MDN
 from models.SCOUT_MDN import SCOUT_MDN
+from models.VAE_GNN import VAE_GNN
+from models.VAE_GATED import VAE_GATED
 from models.Gated_GCN import GatedGCN
 from models.gnn_rnn import Model_GNN_RNN
 from tqdm import tqdm
@@ -50,7 +52,7 @@ def seed_torch(seed=0):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-seed_torch(121958)
+seed_torch(0)  #121958
 
         
 def collate_test(samples):
@@ -221,11 +223,8 @@ class LitGNN(pl.LightningModule):
     def test_step(self, test_batch, batch_idx):
         
         batched_graph, snorm_n, snorm_e, track_info, feats , obj_class, mean_xy, output_masks = test_batch
-
-        last_loc = feats[:,-1:,:2]
+        last_loc = feats[:,-1:,:2].detach().clone() 
         feats_vel= self.compute_change_pos(feats)
-        #Inputs
-        #feats = torch.cat([feats[:,:,:], feats_vel], dim=-1)
         #Inputs vel + heading + obj
         feats = torch.cat([feats_vel, feats[:,:,2:input_feat]], dim=-1)[:,1:,:]
 
@@ -237,12 +236,15 @@ class LitGNN(pl.LightningModule):
             rel_type = batched_graph.edata['rel_type'].long()
             norm = batched_graph.edata['norm']
             pred = self.model(batched_graph, feats,e_w, rel_type,norm)
+        elif self.model_type == 'vae' or self.model_type == 'vae_gated':
+            pred = self.model.inference(batched_graph, feats,e_w,snorm_n,snorm_e)        
         else:
             pred = self.model(batched_graph, feats,e_w,snorm_n,snorm_e)
 
 
         if probabilistic:
             pred=self.sample(pred)  #N,12
+        
 
         pred=pred.view(pred.shape[0],6,-1)
         
@@ -267,16 +269,20 @@ class LitGNN(pl.LightningModule):
 
 if __name__ == "__main__":
 
-    hidden_dims = 512
+    hidden_dims = 768
+    z_dim=100
+    scale_factor = 1
     heads = 2
     input_feat = 5
-    model_type = 'gat'
+    model_type = 'vae_gated'
     history_frames = 6
     future_frames= 6
-    probabilistic = True
+    probabilistic = False
     ew_types=True
+    dropout=0.1
+    attn_drop=0.25
 
-    test_dataset = ApolloScape_DGLDataset(train_val='test', test=True, rel_types=ew_types)  #230
+    test_dataset = ApolloScape_DGLDataset(train_val='test', test=True, rel_types=ew_types, scale_factor=scale_factor)  #230
     test_dataloader=DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_test, num_workers=12)  
     print(len(test_dataloader))
     input_dim = input_feat*5  #feats vel+head+obj+mask * 5frames (remove vel[0])  #6*history_frames
@@ -286,16 +292,20 @@ if __name__ == "__main__":
         hidden_dims = round(hidden_dims/heads)
         model = SCOUT_MDN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, heads=heads, bn=False, att_ew=True, ew_type=ew_types)
     elif model_type == 'gcn':
-        model = model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
+        model = GCN(in_feats=input_dim, hid_feats=hidden_dims, out_feats=output_dim, dropout=0, gcn_drop=0, bn=False, gcn_bn=False)
     elif model_type == 'gated':
         model = GatedGCN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1, bn= True)
     elif model_type == 'gated_mdn':
         model = Gated_MDN(input_dim=input_dim, hidden_dim=hidden_dims, output_dim=output_dim, dropout=0.1,bn=True, ew_type=ew_types)
     elif model_type == 'rgcn':
         model = RGCN(in_dim=input_dim, h_dim=hidden_dims, out_dim=output_dim, num_rels=3, num_bases=-1, num_hidden_layers=2, embedding=True, bn=False, dropout=0.1) 
+    elif model_type == 'vae_gated':
+        model = VAE_GATED(input_dim, hidden_dims, z_dim, output_dim, fc=False, dropout=dropout,  ew_dims=2)
+    else:
+        model = VAE_GNN(input_dim, hidden_dims//heads, z_dim, output_dim, fc=False, dropout=dropout, att_ew=True, feat_drop=0., attn_drop=attn_drop, heads=heads, ew_dims=2)
 
     LitGCN_sys = LitGNN(model=model, lr=1e-3, model_type=model_type,wd=0.1, history_frames=history_frames, future_frames=future_frames)
-    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path= '/home/sandra/PROGRAMAS/DBU_Graph/logs/MDN/APOLLO/lemon-sweep-2/epoch=301-step=19025.ckpt',model=LitGCN_sys.model, rel_types=ew_types)
+    LitGCN_sys = LitGCN_sys.load_from_checkpoint(checkpoint_path= '/home/sandra/PROGRAMAS/DBU_Graph/logs/VAE-GNN/lively-sweep-31/epoch=19-step=1259.ckpt',model=LitGCN_sys.model, rel_types=ew_types)
     LitGCN_sys.model_type = model_type 
     LitGCN_sys.history_frames = history_frames
     LitGCN_sys.future_frames = future_frames

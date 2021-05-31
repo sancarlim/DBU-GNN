@@ -158,8 +158,8 @@ class SCOUT_MDN(nn.Module):
             else:
                 self.embedding_e2 = nn.Linear(1, hidden_dim*heads)
             self.gat_2 = MultiHeadGATLayer(hidden_dim*heads,hidden_dim*heads, res_weight=res_weight , res_connection=res_connection ,num_heads=1, feat_drop=0., attn_drop=0., att_ew=att_ew) #GATConv(hidden_dim*heads, hidden_dim*heads, heads,feat_drop, attn_drop,residual=True, activation='relu')
-            self.linear1 = nn.Linear(hidden_dim*heads, hidden_dim*heads) 
-            self.mdn = MDN(hidden_dim*heads, output_dim, 3)
+            self.linear1 = nn.Linear(hidden_dim*heads, hidden_dim) 
+            self.mdn = MDN(hidden_dim, output_dim, 3)
 
         if dropout:
             self.dropout_l = nn.Dropout(dropout)

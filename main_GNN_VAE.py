@@ -260,7 +260,7 @@ def sweep_train():
     wandb_logger = pl_loggers.WandbLogger()  #name=
     
     input_dim = config.input_dim*5 if dataset=='apollo' else config.input_dim*config.history_frames
-    output_dim = 2*config.future_frames #if config.probabilistic == False else 5*config.future_frames
+    output_dim = 2*config.future_frames if config.probabilistic == False else 5*config.future_frames
 
     model = VAE_GNN(input_dim, config.hidden_dims//config.heads, config.z_dims, output_dim, fc=False, dropout=config.dropout, feat_drop=config.feat_drop, attn_drop=config.attn_drop, heads=config.heads, att_ew=config.att_ew, ew_dims=config.ew_dims)
 

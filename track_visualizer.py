@@ -81,8 +81,8 @@ class TrackVisualizer(object):
         self.track_style = dict(linewidth=1, zorder=10)
         self.centroid_style = dict(fill=True, edgecolor="black", lw=0.1, alpha=1,
                                    radius=5, zorder=30)
-        self.track_style_future = dict(color="linen", linewidth=1, alpha=0.7, zorder=10)
-        self.track_style_pred = dict(color="aqua", linewidth=1, alpha=0.7, zorder=10)
+        self.track_style_future = dict(color="linen", linewidth=2, alpha=0.7, zorder=10)
+        self.track_style_pred = dict(color="aqua", linewidth=1.5, alpha=1, zorder=10)
         self.circ_stylel = dict(facecolor="g", fill=True, edgecolor="r", lw=0.1, alpha=1,
                                 radius=8, zorder=30)
         self.circ_styler = dict(facecolor="b", fill=True, edgecolor="r", lw=0.1, alpha=1,
@@ -195,9 +195,18 @@ class TrackVisualizer(object):
     def update_figure(self):
         # Plot the bounding boxes, their text annotations and direction arrow
         plotted_objects = []
-        for track_ind in self.ids_for_frame[self.current_frame]:
-            track = self.tracks[track_ind]  
-            pred = self.preds[track_ind]   #pred[0] -> objid 1
+        for i, track_ind in enumerate(self.ids_for_frame[self.current_frame]):
+            '''
+            index = None
+            for row, item in enumerate(self.preds):
+                if item['trackId'] == track_ind:
+                    index = row
+            
+            if index is None:
+                continue
+            '''
+            track = next((item for item in self.tracks if item["trackId"] == track_ind), None) #self.tracks[index]  
+            pred = next((item for item in self.preds if item["obj_id"] == track_ind), None)  #self.preds[index]   #pred[0] -> objid 1
             
             
             track_id = track["trackId"]
@@ -210,9 +219,9 @@ class TrackVisualizer(object):
             is_bicycle = object_class in ['bicycle']
             bounding_box = track["bboxVis"][current_index] / self.scale_down_factor
             center_points = track["centerVis"] / self.scale_down_factor
-            pred_center_points = pred["centerVis"] / self.scale_down_factor 
             center_point = center_points[current_index]
-            pred_exists = np.where(pred['frame_id']==self.current_frame)[0].size != 0 #if pred_exists else False
+            
+            pred_exists = np.where(pred['frame_id']==self.current_frame)[0].size != 0 if pred is not None else False
             #pred_center_point = pred_center_points[np.where(pred['frame_id']==self.current_frame)[0][0]]  ##if we don't have pred for this frame .size == 0
             
 
@@ -258,32 +267,48 @@ class TrackVisualizer(object):
                     plotted_objects.append(plotted_centroids)
                     if self.config["plotFutureTrackingLines"]:
                         # Check track direction
-                        '''
+                        
                         plotted_centroids_future = self.ax.plot(
-                            center_points[current_index:][:, 0],
-                            center_points[current_index:][:, 1],
+                            center_points[current_index:current_index+120][:, 0],
+                            center_points[current_index:current_index+120][:, 1],
                             **self.track_style_future)
                         plotted_objects.append(plotted_centroids_future)
-                        '''
+                        
                         #Plot predictions
                         if pred_exists:
+                            pred_center_points = pred["centerVis"] / self.scale_down_factor 
+           
                             #Polynomial fit
                             #draw_pred=np.concatenate( (pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][::5], 
                             #                           pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][-1].reshape(-1,2)), axis=0 )
-                            #index = int(np.where(pred['frame_id']==self.current_frame)[0][-1])
                             
+                            #inD
+                            index = []
+                            for i,frame in enumerate(range(self.current_frame, self.current_frame+120, 10)):
+                                if np.where(pred['frame_id']==frame)[0].size != 0:
+                                    if np.where(pred['frame_id']==frame)[0].shape[0] > 1:
+                                        index.append(np.where(pred['frame_id']==frame)[0][-2])
+                                    else:
+                                        index.append(np.where(pred['frame_id']==frame)[0][-1])
                             draw_ids = [int(np.where(pred['frame_id']==frame)[0][-1])  for frame in range(self.current_frame, self.current_frame+120, 10)  if np.where(pred['frame_id']==frame)[0].size != 0]
-                            #draw_pred= pred_center_points[index:index+5]
+                            draw_pred= pred_center_points[index]
+                            #index = int(np.where(pred['frame_id']==self.current_frame)[0][-1])
+                            #last_index = pred_center_points[index:index+12].shape[0] - 1
+                            #draw_pred= np.concatenate( (pred_center_points[index:last_index], pred_center_points[index:][last_index:]), axis=0 )
+
+                            #ROUND(sin solape)
+                            #index = int(np.where(pred['frame_id']==self.current_frame)[0][-1])
+                            #draw_pred= pred_center_points[index:index+12]
                             
                             #FOR  3/3 s
                             #draw_pred=np.concatenate( (pred_center_points[index:index+3], 
                             #                           pred_center_points[index:index+3][-1].reshape(-1,2)), axis=0 )
-                            draw_pred= pred_center_points[draw_ids]
+                            
 
                             print(self.current_frame, draw_pred.shape,track_ind)
                             
                             if draw_pred.min() != 0: 
-                                
+                                '''
                                 if len(draw_pred)>3:  #Min 4 points for spline interpolation
                                     t = np.arange(len(draw_pred))
                                     ti = np.linspace(0, t.max(), 10 * t.size)
@@ -292,7 +317,7 @@ class TrackVisualizer(object):
                                     draw_pred =np.array([list(xi), list(yi)]).transpose()
                                     #coefs = np.polyfit(draw_pred[:,0],draw_pred[:,1],3)
                                     #draw_pred =np.array([list(draw_pred[:,0]), list(np.polyval(coefs,draw_pred[:,0]))]).transpose() 
-                                
+                                '''
                                 plotted_centroids_pred = self.ax.plot(
                                     #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 0],
                                     #pred_center_points[int(np.where(pred['frame_id']==self.current_frame)[0][0]):][:, 1], 
@@ -335,8 +360,8 @@ class TrackVisualizer(object):
                     center_point[0],
                     (center_point[1]))
                 text_location = (
-                    (center_point[0] + 45),
-                    (center_point[1] - 20))
+                    (center_point[0] + 15),
+                    (center_point[1] - 10))
                 text_patch = self.ax.annotate(annotation_text, xy=target_location, xytext=text_location,
                                               bbox={"fc": color, **self.text_box_style}, **self.text_style)
                 plotted_objects.append(text_patch)

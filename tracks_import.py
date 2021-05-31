@@ -63,8 +63,8 @@ def read_from_csv(track_file, static_tracks_file, recordings_meta_file, pred_fil
 
 def read_preds(pred_file, meta_info):
     df = pandas.read_csv(pred_file)
-    df = df[df.recording_id != 0]
-    raw_preds = df.groupby(["obj_id"], sort=False)
+    df = df[df.frame_id != 0]
+    raw_preds = df.groupby(["obj_id"], sort=True)
     ortho_px_to_meter = meta_info["orthoPxToMeter"]
     preds=[]
     for pred_id, pred_rows in raw_preds:

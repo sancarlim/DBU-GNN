@@ -45,11 +45,12 @@ def collate_batch(samples):
 
 class ApolloScape_DGLDataset(torch.utils.data.Dataset):
 
-    def __init__(self, train_val,  test=False, data_path=None, ew_dims=2):
+    def __init__(self, train_val,  test=False, data_path=None, rel_types=True, scale_factor=10):
         self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_train_data.pkl'
         self.train_val=train_val
         self.test = test
-        self.ew_dims = ew_dims
+        self.rel_types = rel_types
+        self.scale_factor = scale_factor
         if test:
             self.raw_dir='/home/sandra/PROGRAMAS/DBU_Graph/data/apollo_test_data.pkl'
         self.process() 
@@ -58,7 +59,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
     def load_data(self):
         with open(self.raw_dir, 'rb') as reader:
             # Training (N, C, T, V)=(5010, 11, 12, 120), (5010, 120, 120), (5010, 2)
-            [all_feature, self.all_adjacency, self.all_mean_xy,_]= pickle.load(reader)
+            [all_feature, self.all_adjacency, self.all_mean_xy]= pickle.load(reader)
         all_feature=np.transpose(all_feature, (0,3,2,1)) #(N,V,T,C)
         self.all_feature=torch.from_numpy(all_feature).type(torch.float32)
 
@@ -93,10 +94,10 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             mask_car[i,:]=np.array(mask_car_t).reshape(mask_car.shape[1],1)+np.zeros(12)#.to('cuda') #120x12
         '''
 
-        #rescale_xy=torch.ones((1,1,1,2))
+        rescale_xy=torch.ones((1,1,1,2))*self.scale_factor
         #rescale_xy[:,:,:,0] = torch.max(abs(self.all_feature[:,:,:,3]))
         #rescale_xy[:,:,:,1] = torch.max(abs(self.all_feature[:,:,:,4]))
-        #self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy
+        self.all_feature[:,:,:now_history_frame,3:5] = self.all_feature[:,:,:now_history_frame,3:5]/rescale_xy  #scale input x,y - positions
         self.node_features = self.all_feature[:,:,:now_history_frame, feature_id] #*(np.expand_dims(mask_car[:,:,:6],axis=-1))).type(torch.float32)  #obj type,x,y 6 primeros frames
         self.node_labels=self.all_feature[:,:,now_history_frame:,[3,4]] #x,y 6 ultimos frames
         #self.node_features[:,:,:,-1] *= mask_car[:,:,:6]   #Pongo 0 en feat 11 [mask] a todos los obj visibles no-car
@@ -157,7 +158,7 @@ class ApolloScape_DGLDataset(torch.utils.data.Dataset):
             rel_types=[torch.zeros(1, dtype=torch.float32) for i in range(graph.num_nodes())]
         distances = [self.xy_dist[idx][graph.edges()[0][i]][graph.edges()[1][i]] for i in range(graph.num_edges())]
         distances = [1/(i) if i!=0 else 1 for i in distances]
-        if self.ew_dims == 2:
+        if self.rel_types:
             distances = F.softmax(torch.tensor(distances, dtype=torch.float32), dim=0)
             graph.edata['w'] = torch.tensor([[distances[i],rel_types[i]] for i in range(len(rel_types))], dtype=torch.float32)
         else:

@@ -164,3 +164,12 @@ main_grip.py
 *.jpg
 *.pdf
 *.ckpt
+*events*
+*.zip
+*ypnb
+*.tar*
+*yml*
+*npy*
+*mp4*
+*txt*
+*tsv*
